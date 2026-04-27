@@ -22,10 +22,14 @@ from examen import (
 class FakeBackend:
     def __init__(self) -> None:
         self.payloads: list[dict[str, Any]] = []
+        self.close_calls = 0
 
     async def ingest_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.payloads.append(payload)
         return {"ok": True}
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class Input(BaseModel):
@@ -158,7 +162,7 @@ def test_scorer_type_mismatch_raises_at_decoration() -> None:
         @bench.experiment[Input, Output](
             name="bad",
             cases=[],
-            scorers=[ExactMatchScorer[OtherIn, OtherOut]()],
+            scorers=[ExactMatchScorer[OtherIn, OtherOut]()],  # type: ignore[list-item]
         )
         def f(input: Input, trace: Trace[Input, Output]) -> Output:
             return Output(result=0)

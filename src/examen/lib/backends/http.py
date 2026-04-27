@@ -31,3 +31,8 @@ class Connector:
             )
             r.raise_for_status()
             return cast(dict[str, Any], r.json())
+
+    async def close(self) -> None:
+        # Each ingest opens its own httpx client, so there's nothing persistent
+        # to release here. Kept to satisfy the Backend protocol.
+        return None

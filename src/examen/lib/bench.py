@@ -198,10 +198,17 @@ class AsyncBench:
         dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
     ) -> None:
         overrides = dependency_overrides or {}
-        for exp in self._experiments.values():
-            for case in exp.cases:
-                for _ in range(case.repeats):
-                    await self._run_one(exp, case, version, overrides)
+        try:
+            for exp in self._experiments.values():
+                for case in exp.cases:
+                    for _ in range(case.repeats):
+                        await self._run_one(exp, case, version, overrides)
+        finally:
+            # Backends with end-of-run artifacts (LocalReportBackend writes its
+            # HTML here) need a finalize hook. The HTTP Connector's close() is
+            # a no-op. Run in finally so artifacts are produced even if a run
+            # raised through.
+            await asyncio.gather(*(b.close() for b in self.backends))
 
     async def _run_one(
         self,

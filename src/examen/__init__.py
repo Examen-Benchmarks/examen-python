@@ -1,5 +1,6 @@
 from examen.lib.backends.base import Backend
 from examen.lib.backends.http import Connector
+from examen.lib.backends.local import LocalReportBackend
 from examen.lib.base import Case, Metric, MetricKind, RunStatus
 from examen.lib.bench import AsyncBench
 from examen.lib.depends import Depends
@@ -15,6 +16,7 @@ __all__ = [
     "Depends",
     "ExactMatchScorer",
     "LLMAsAJudgeScorer",
+    "LocalReportBackend",
     "Metric",
     "MetricKind",
     "RunStatus",
