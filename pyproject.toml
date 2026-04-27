@@ -35,6 +35,7 @@ ignore = [
     "E501",   # line length handled by formatter
     "UP046",  # keep Generic[T] syntax; pydantic generics + PEP 695 still has rough edges
     "UP047",  # same — keep TypeVar-based generics for consistency
+    "B008",   # Depends(...) in defaults is the whole point of the DI API (FastAPI convention)
 ]
 
 [tool.ruff.format]

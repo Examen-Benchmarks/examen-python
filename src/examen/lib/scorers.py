@@ -64,7 +64,9 @@ class Scorer(ABC, Generic[InputT, OutputT]):
             if not issubclass(origin, Scorer):
                 continue
             args = typing.get_args(base)
-            if len(args) == 2 and all(isinstance(a, type) and issubclass(a, BaseModel) for a in args):
+            if len(args) == 2 and all(
+                isinstance(a, type) and issubclass(a, BaseModel) for a in args
+            ):
                 return cast("tuple[type[InputT], type[OutputT]]", args)
 
         raise TypeError(
@@ -97,7 +99,7 @@ class ExactMatchScorer(Scorer[InputT, OutputT]):
         )
 
 
-class LLMAsaJudgeScorer(Scorer[InputT, OutputT]):
+class LLMAsAJudgeScorer(Scorer[InputT, OutputT]):
     def __init__(self, model: str, guidelines: str) -> None:
         self.model = model
         self.guidelines = guidelines
@@ -108,5 +110,5 @@ class LLMAsaJudgeScorer(Scorer[InputT, OutputT]):
         trace: Trace[InputT, OutputT],
     ) -> Metric:
         raise NotImplementedError(
-            "LLMAsaJudgeScorer is a placeholder; wire up an LLM client to implement."
+            "LLMAsAJudgeScorer is a placeholder; wire up an LLM client to implement."
         )

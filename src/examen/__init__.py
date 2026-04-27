@@ -3,7 +3,7 @@ from examen.lib.backends.http import Connector
 from examen.lib.base import Case, Metric, MetricKind, RunStatus
 from examen.lib.bench import AsyncBench
 from examen.lib.depends import Depends
-from examen.lib.scorers import ExactMatchScorer, LLMAsaJudgeScorer, Scorer
+from examen.lib.scorers import ExactMatchScorer, LLMAsAJudgeScorer, Scorer
 from examen.lib.trace import Trace, TraceStep
 
 __all__ = [
@@ -13,7 +13,7 @@ __all__ = [
     "Connector",
     "Depends",
     "ExactMatchScorer",
-    "LLMAsaJudgeScorer",
+    "LLMAsAJudgeScorer",
     "Metric",
     "MetricKind",
     "RunStatus",

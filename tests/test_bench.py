@@ -89,7 +89,9 @@ async def test_repeats_produce_separate_runs() -> None:
 
     @bench.experiment(
         name="add",
-        cases=[Case[Input, Output](name="r", input=Input(a=1, b=2), output=Output(result=3), repeats=3)],
+        cases=[
+            Case[Input, Output](name="r", input=Input(a=1, b=2), output=Output(result=3), repeats=3)
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -181,3 +183,106 @@ def test_fans_out_to_all_backends() -> None:
 
     assert len(b1.payloads) == 1
     assert len(b2.payloads) == 1
+
+
+async def test_no_summarizers_means_null_summaries() -> None:
+    backend = FakeBackend()
+    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+
+    @bench.experiment(
+        name="add",
+        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def add(input: Input, trace: Trace[Input, Output]) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    p = backend.payloads[0]
+    assert p["case"]["input_summary"] is None
+    assert p["run"]["output_summary"] is None
+
+
+async def test_summarizers_appear_in_payload() -> None:
+    backend = FakeBackend()
+    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+
+    @bench.experiment(
+        name="add",
+        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        scorers=[ExactMatchScorer[Input, Output]()],
+        summarize_input=lambda i: f"{i.a} + {i.b}",
+        summarize_output=lambda o: str(o.result),
+    )
+    def add(input: Input, trace: Trace[Input, Output]) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    p = backend.payloads[0]
+    assert p["case"]["input_summary"] == "1 + 2"
+    assert p["run"]["output_summary"] == "3"
+
+
+async def test_summarizer_raise_falls_back_to_repr() -> None:
+    backend = FakeBackend()
+    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+
+    def boom(_: Input) -> str:
+        raise ValueError("nope")
+
+    @bench.experiment(
+        name="add",
+        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        scorers=[ExactMatchScorer[Input, Output]()],
+        summarize_input=boom,
+    )
+    def add(input: Input, trace: Trace[Input, Output]) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    p = backend.payloads[0]
+    assert p["case"]["input_summary"] == repr(Input(a=1, b=2))
+
+
+async def test_errored_run_skips_output_summary() -> None:
+    backend = FakeBackend()
+    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+
+    summarize_output_calls: list[Any] = []
+
+    def track(o: Output) -> str:
+        summarize_output_calls.append(o)
+        return "called"
+
+    @bench.experiment(
+        name="boom",
+        cases=[Case[Input, Output](name="x", input=Input(a=0, b=0))],
+        scorers=[],
+        summarize_input=lambda i: f"{i.a},{i.b}",
+        summarize_output=track,
+    )
+    def boom(input: Input) -> Output:
+        raise RuntimeError("kaboom")
+
+    await bench.run(version={"v": "1"})
+
+    p = backend.payloads[0]
+    assert p["run"]["status"] == "errored"
+    assert p["case"]["input_summary"] == "0,0"  # input summary still computed
+    assert p["run"]["output_summary"] is None
+    assert summarize_output_calls == []  # summarize_output not invoked on error
+
+
+def test_non_callable_summarizer_raises_at_decoration() -> None:
+    bench = AsyncBench(backends=[FakeBackend()], project_name="p", name="b")
+
+    with pytest.raises(TypeError, match="summarize_input must be callable"):
+        bench.experiment(
+            name="bad",
+            cases=[],
+            scorers=[],
+            summarize_input="not a function",  # type: ignore[arg-type]
+        )
