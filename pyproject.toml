@@ -1,6 +1,6 @@
 [project]
 name = "examen"
-version = "0.0.1"
+version = "0.0.4"
 description = "Python SDK for Examen, a generic benchmarking platform."
 readme = "README.md"
 authors = [

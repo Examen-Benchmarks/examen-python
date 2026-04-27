@@ -11,7 +11,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 InputT = TypeVar("InputT", bound=BaseModel)
-OutputT = TypeVar("OutputT", bound=BaseModel)
+OutputT = TypeVar("OutputT", bound=BaseModel | None)
 
 
 class MetricKind(StrEnum):
@@ -63,11 +63,12 @@ class Case(BaseModel, Generic[InputT, OutputT]):
 
     name: str = Field(description="Unique identifier within the experiment.")
     input: InputT = Field(description="The input passed to the experiment function.")
-    output: OutputT | None = Field(
-        default=None,
+    output: OutputT = Field(
         description=(
-            "Optional labeled output. Semantics are scorer-defined: an exact-match "
-            "scorer treats it as expected; a load-test scorer may ignore it."
+            "Labeled output. Semantics are scorer-defined: an exact-match scorer "
+            "treats it as expected; a load-test scorer may ignore it. Parameterize "
+            "as `Case[Input, Output | None]` (or `Case[Input, None]`) when cases "
+            "have no labels."
         ),
     )
     repeats: int = Field(

@@ -15,14 +15,14 @@ from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from pydantic import BaseModel
 
 from examen.lib.backends.base import Backend
 from examen.lib.base import Case, InputT, Metric, OutputT, RunStatus
 from examen.lib.depends import DependsMarker, solve
-from examen.lib.scorers import Scorer
+from examen.lib.scorers import AsyncScorer
 from examen.lib.trace import Trace
 
 # Preserves the decorated function's exact type (sync or async) through the
@@ -36,9 +36,9 @@ class _Experiment:
     name: str
     func: Callable[..., Any]
     cases: list[Case[Any, Any]]
-    scorers: list[Scorer[Any, Any]]
+    scorers: list[AsyncScorer[Any, Any]]
     input_type: type[BaseModel]
-    output_type: type[BaseModel]
+    output_type: type[BaseModel | None]
     input_param: str
     trace_param: str | None
     summarize_input: Callable[[Any], str] | None
@@ -67,13 +67,16 @@ class _TypedExperimentFactory(Generic[InputT, OutputT]):
         *,
         name: str,
         cases: list[Case[InputT, OutputT]],
-        scorers: list[Scorer[InputT, OutputT]],
+        scorers: list[AsyncScorer[InputT, OutputT]],
         summarize_input: Callable[[InputT], str] | None = None,
         summarize_output: Callable[[OutputT], str] | None = None,
     ) -> Callable[[F], F]:
+        # OutputT is bound to `BaseModel | None`, so the runtime class is
+        # always either a BaseModel subclass or `NoneType`. mypy doesn't bridge
+        # `type[OutputT]` to `type[BaseModel] | type[None]` automatically.
         return self._bench._register_experiment(
             input_type=self._input_type,
-            output_type=self._output_type,
+            output_type=cast("type[BaseModel] | type[None]", self._output_type),
             name=name,
             cases=cases,
             scorers=scorers,
@@ -83,16 +86,17 @@ class _TypedExperimentFactory(Generic[InputT, OutputT]):
 
 
 class _ExperimentRegistrar:
-    """Subscript-aware accessor for ``AsyncBench.experiment``.
+    """Subscript-only accessor for ``AsyncBench.experiment``.
 
-    Two forms::
+    Single form, mandatory subscript so every kwarg is type-checked::
 
-        @bench.experiment[Input, Output](name=..., cases=..., ...)   # type-checked
-        @bench.experiment(name=..., cases=..., ...)                  # untyped fallback
+        @bench.experiment[Input, Output](name=..., cases=..., scorers=..., ...)
+        def f(input: Input, ...) -> Output: ...
 
-    The subscripted form binds ``InputT`` / ``OutputT`` so every kwarg shares
-    the same types — mismatches are caught by the type-checker before runtime.
-    The untyped form remains for back-compat and quick scripts.
+    There is deliberately no untyped ``bench.experiment(...)`` form. Allowing
+    one would let downstream users opt out of all type-checking by omitting
+    the subscript — silently turning ``cases`` / ``scorers`` / summarizers
+    into ``Any`` and defeating the whole point of the generics.
     """
 
     def __init__(self, bench: "AsyncBench") -> None:
@@ -108,25 +112,6 @@ class _ExperimentRegistrar:
             )
         input_type, output_type = params
         return _TypedExperimentFactory(self._bench, input_type, output_type)
-
-    def __call__(
-        self,
-        *,
-        name: str,
-        cases: list[Case[Any, Any]],
-        scorers: list[Scorer[Any, Any]],
-        summarize_input: Callable[[Any], str] | None = None,
-        summarize_output: Callable[[Any], str] | None = None,
-    ) -> Callable[[F], F]:
-        return self._bench._register_experiment(
-            input_type=None,
-            output_type=None,
-            name=name,
-            cases=cases,
-            scorers=scorers,
-            summarize_input=summarize_input,
-            summarize_output=summarize_output,
-        )
 
 
 class AsyncBench:
@@ -147,11 +132,11 @@ class AsyncBench:
     def _register_experiment(
         self,
         *,
-        input_type: type[BaseModel] | None,
-        output_type: type[BaseModel] | None,
+        input_type: type[BaseModel],
+        output_type: type[BaseModel | None],
         name: str,
         cases: list[Case[Any, Any]],
-        scorers: list[Scorer[Any, Any]],
+        scorers: list[AsyncScorer[Any, Any]],
         summarize_input: Callable[[Any], str] | None,
         summarize_output: Callable[[Any], str] | None,
     ) -> Callable[[F], F]:
@@ -163,34 +148,29 @@ class AsyncBench:
         def decorator(func: F) -> F:
             input_param, trace_param, sig_input_type, sig_output_type = _inspect_func(func)
 
-            # If types were given via subscript, validate the signature matches.
-            # When omitted, the signature is the source of truth.
-            if input_type is not None and input_type is not sig_input_type:
+            if input_type is not sig_input_type:
                 raise TypeError(
                     f"@bench.experiment[{input_type.__name__}, ...] doesn't match "
                     f"{func.__name__}'s input parameter type {sig_input_type.__name__}"
                 )
-            if output_type is not None and output_type is not sig_output_type:
+            if output_type is not sig_output_type:
                 raise TypeError(
                     f"@bench.experiment[..., {output_type.__name__}] doesn't match "
                     f"{func.__name__}'s return type {sig_output_type.__name__}"
                 )
 
-            effective_input = input_type or sig_input_type
-            effective_output = output_type or sig_output_type
-
             for scorer in scorers:
-                if scorer.input_type is not effective_input:
+                if scorer.input_type is not input_type:
                     raise TypeError(
                         f"Scorer {type(scorer).__name__} has input_type "
                         f"{scorer.input_type!r}, but {func.__name__} takes "
-                        f"{effective_input!r}"
+                        f"{input_type!r}"
                     )
-                if scorer.output_type is not effective_output:
+                if scorer.output_type is not output_type:
                     raise TypeError(
                         f"Scorer {type(scorer).__name__} has output_type "
                         f"{scorer.output_type!r}, but {func.__name__} returns "
-                        f"{effective_output!r}"
+                        f"{output_type!r}"
                     )
 
             if name in self._experiments:
@@ -201,8 +181,8 @@ class AsyncBench:
                 func=func,
                 cases=cases,
                 scorers=scorers,
-                input_type=effective_input,
-                output_type=effective_output,
+                input_type=input_type,
+                output_type=output_type,
                 input_param=input_param,
                 trace_param=trace_param,
                 summarize_input=summarize_input,
@@ -262,7 +242,7 @@ class AsyncBench:
         if status is RunStatus.SUCCEEDED:
             for scorer in exp.scorers:
                 try:
-                    metrics.append(scorer.score(case, trace))
+                    metrics.extend(await scorer.score(case, trace))
                 except Exception as e:
                     status = RunStatus.ERRORED
                     error_message = f"Scorer {type(scorer).__name__} raised {type(e).__name__}: {e}"
@@ -327,7 +307,7 @@ def _is_trace(ann: Any) -> bool:
 
 def _inspect_func(
     func: Callable[..., Any],
-) -> tuple[str, str | None, type[BaseModel], type[BaseModel]]:
+) -> tuple[str, str | None, type[BaseModel], type[BaseModel | None]]:
     sig = inspect.signature(func)
     hints = typing.get_type_hints(func)
 
