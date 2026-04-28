@@ -18,8 +18,8 @@ build:
 	uv lock
 # 	uv export --no-hashes > requirements.txt
 
-test: 
-	uv run pytest --cov=. --cov-report=html
+test:
+	uv run pytest --cov --cov-report=term-missing --cov-report=html
 
 check: check-lint build test
 all: lint build test
