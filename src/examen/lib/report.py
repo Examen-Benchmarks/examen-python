@@ -76,6 +76,9 @@ details details > summary { background: transparent; border: none; padding: 4px 
 .metric { display: inline-block; padding: 2px 8px; margin: 2px 4px 2px 0;
           background: var(--soft); border: 1px solid var(--border);
           border-radius: 12px; font-size: 12px; }
+.metric-row { margin: 6px 0; }
+.metric-context { margin: 4px 0 6px 12px; font-size: 11px;
+                  white-space: pre-wrap; word-break: break-word; }
 .error-msg { color: var(--err); padding: 8px 10px;
              background: rgba(220, 38, 38, 0.08);
              border: 1px solid rgba(220, 38, 38, 0.2);
@@ -258,13 +261,24 @@ def _render_run(payload: dict[str, Any]) -> str:
 
     metrics = payload.get("metrics", [])
     if metrics:
-        chips = " ".join(
-            f'<span class="metric"><strong>{_esc(m["name"])}</strong> = '
-            f'{float(m["value"]):.3g} '
-            f'<span class="meta">{_esc(m["kind"])}</span></span>'
-            for m in metrics
-        )
-        parts.append(f'<div class="metrics">{chips}</div>')
+        metric_rows: list[str] = []
+        for m in metrics:
+            chip = (
+                f'<span class="metric"><strong>{_esc(m["name"])}</strong> = '
+                f'{float(m["value"]):.3g} '
+                f'<span class="meta">{_esc(m["kind"])}</span></span>'
+            )
+            ctx = m.get("context")
+            if ctx:
+                ctx_json = json.dumps(ctx, indent=2, default=str, ensure_ascii=False)
+                metric_rows.append(
+                    f'<div class="metric-row">{chip}'
+                    f'<pre class="metric-context">{_esc(ctx_json)}</pre>'
+                    f"</div>"
+                )
+            else:
+                metric_rows.append(f'<div class="metric-row">{chip}</div>')
+        parts.append(f'<div class="metrics">{"".join(metric_rows)}</div>')
 
     trace = payload["run"].get("trace") or {}
     steps = trace.get("steps") or []

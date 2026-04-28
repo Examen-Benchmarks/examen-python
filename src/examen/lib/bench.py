@@ -11,7 +11,7 @@ locally and remotely at once.
 import asyncio
 import inspect
 import typing
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -119,11 +119,14 @@ class AsyncBench:
 
     def __init__(
         self,
-        backends: list[Backend],
+        backends: Sequence[Backend],
         project_name: str,
         name: str,
     ) -> None:
-        self.backends = backends
+        # `Sequence[Backend]` (covariant) so callers can pass a concrete
+        # `list[LocalReportBackend]` without the type-checker rejecting it
+        # under list invariance. We copy into a list to own the storage.
+        self.backends: list[Backend] = list(backends)
         self.project_name = project_name
         self.name = name
         self._experiments: dict[str, _Experiment] = {}

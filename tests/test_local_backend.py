@@ -11,9 +11,12 @@ from pydantic import BaseModel
 
 from examen import (
     AsyncBench,
+    AsyncScorer,
     Case,
     ExactMatchScorer,
     LocalReportBackend,
+    Metric,
+    MetricKind,
     Trace,
 )
 from examen.lib.report import render_html
@@ -114,6 +117,52 @@ async def test_local_backend_creates_parent_dirs(tmp_path: Path) -> None:
     await bench.run(version={"v": "1"})
 
     assert out.exists()
+
+
+async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
+    out = tmp_path / "report.html"
+
+    class JudgeScorer(AsyncScorer[Input, Output]):
+        async def score(
+            self,
+            case: Case[Input, Output],
+            trace: Trace[Input, Output],
+        ) -> list[Metric]:
+            return [
+                Metric(
+                    name="judge",
+                    kind=MetricKind.RATIO,
+                    value=0.75,
+                    context={
+                        "rationale": "off by one — close enough for partial credit",
+                        "matched_keys": ["sum"],
+                        "model": "gpt-4o-mini",
+                    },
+                )
+            ]
+
+    bench = AsyncBench(
+        backends=[LocalReportBackend(out)],
+        project_name="p",
+        name="b",
+    )
+
+    @bench.experiment[Input, Output](
+        name="add",
+        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        scorers=[JudgeScorer()],
+    )
+    def add(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    body = out.read_text(encoding="utf-8")
+    assert "judge" in body
+    assert "metric-context" in body  # the wrapper class is present
+    assert "rationale" in body  # the JSON key is rendered
+    assert "off by one" in body  # the JSON value is rendered
+    assert "gpt-4o-mini" in body
 
 
 def test_render_html_handles_empty_runs() -> None:

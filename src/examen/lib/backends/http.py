@@ -29,7 +29,15 @@ class Connector:
                 json=payload,
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
-            r.raise_for_status()
+            if r.is_error:
+                # httpx's default raise_for_status drops the body, which is
+                # exactly the part you need to debug a 4xx. Surface it.
+                raise httpx.HTTPStatusError(
+                    f"{r.status_code} {r.reason_phrase} from "
+                    f"{r.request.method} {r.request.url}\nResponse body: {r.text}",
+                    request=r.request,
+                    response=r,
+                )
             return cast(dict[str, Any], r.json())
 
     async def close(self) -> None:
