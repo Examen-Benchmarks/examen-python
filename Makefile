@@ -24,14 +24,14 @@ test:
 check: check-lint build test
 all: lint build test
 
-# IMAGE := registry.cordos.fr/des/ai-chatter
-# TAG ?= $(shell git rev-parse --short HEAD)
-# NAMESPACE ?= ai-chatter-staging
+IMAGE := registry.cordos.fr/examen/examen-python
+TAG ?= $(shell git rev-parse --short HEAD)
 
-# publish:
-# 	docker build -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
-# 	docker push $(IMAGE):$(TAG)
-# 	docker push $(IMAGE):latest
+
+publish:
+	docker build -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
+	docker push $(IMAGE):$(TAG)
+	docker push $(IMAGE):latest
 
 # deploy:
 # 	kubectl set image deployment/api -n $(NAMESPACE) \
