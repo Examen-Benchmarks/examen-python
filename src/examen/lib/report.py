@@ -121,8 +121,7 @@ def render_html(runs: list[dict[str, Any]]) -> str:
         by_experiment[str(r["experiment"]["name"])].append(r)
 
     sections = "\n".join(
-        _render_experiment(name, exp_runs)
-        for name, exp_runs in by_experiment.items()
+        _render_experiment(name, exp_runs) for name, exp_runs in by_experiment.items()
     )
     timestamp = datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -206,10 +205,7 @@ def _render_case_row(
     metric_cells: list[str] = []
     for name in metric_names:
         values = [
-            float(m["value"])
-            for r in runs
-            for m in r.get("metrics", [])
-            if m["name"] == name
+            float(m["value"]) for r in runs for m in r.get("metrics", []) if m["name"] == name
         ]
         if values:
             cell = f"{mean(values):.3g}"
@@ -265,7 +261,7 @@ def _render_run(payload: dict[str, Any]) -> str:
         for m in metrics:
             chip = (
                 f'<span class="metric"><strong>{_esc(m["name"])}</strong> = '
-                f'{float(m["value"]):.3g} '
+                f"{float(m['value']):.3g} "
                 f'<span class="meta">{_esc(m["kind"])}</span></span>'
             )
             ctx = m.get("context")
@@ -300,12 +296,7 @@ def _render_run(payload: dict[str, Any]) -> str:
         )
 
     body = "\n".join(parts) if parts else '<div class="meta">No details</div>'
-    return (
-        f"<details>"
-        f"<summary>{summary}</summary>"
-        f'<div class="run-body">{body}</div>'
-        f"</details>"
-    )
+    return f'<details><summary>{summary}</summary><div class="run-body">{body}</div></details>'
 
 
 def _duration_html(run: dict[str, Any]) -> str:
@@ -330,7 +321,7 @@ def _empty_doc() -> str:
         '<html lang="en"><head><meta charset="utf-8">'
         "<title>Examen — empty</title>"
         f"<style>{_CSS}</style></head>"
-        '<body><h1>No runs</h1>'
+        "<body><h1>No runs</h1>"
         '<div class="subtitle">This bench produced no runs.</div>'
         "</body></html>\n"
     )

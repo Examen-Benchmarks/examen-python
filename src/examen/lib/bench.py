@@ -107,9 +107,7 @@ class _ExperimentRegistrar:
         params: tuple[type[InputT], type[OutputT]],
     ) -> _TypedExperimentFactory[InputT, OutputT]:
         if not isinstance(params, tuple) or len(params) != 2:
-            raise TypeError(
-                "bench.experiment[Input, Output] expects exactly two type parameters"
-            )
+            raise TypeError("bench.experiment[Input, Output] expects exactly two type parameters")
         input_type, output_type = params
         return _TypedExperimentFactory(self._bench, input_type, output_type)
 

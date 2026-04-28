@@ -192,4 +192,4 @@ async def test_close_idempotent_across_repeated_run_calls(tmp_path: Path) -> Non
 
     body = out.read_text(encoding="utf-8")
     # Both runs accumulate into the same backend
-    assert body.count("<details><summary><span class=\"dot dot-ok\"></span>") >= 2
+    assert body.count('<details><summary><span class="dot dot-ok"></span>') >= 2
