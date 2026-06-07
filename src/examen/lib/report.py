@@ -52,6 +52,10 @@ body > * { max-width: 1100px; margin-left: auto; margin-right: auto; }
 h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
 h2 { font-size: 16px; margin: 28px 0 10px; padding-bottom: 6px;
      border-bottom: 1px solid var(--border); font-weight: 600; }
+.breadcrumb { color: var(--muted); font-size: 12px; margin: 28px 0 -2px;
+              text-transform: uppercase; letter-spacing: 0.04em; }
+.breadcrumb .sep { opacity: 0.5; margin: 0 4px; }
+.breadcrumb + h2 { margin-top: 4px; }
 .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
 .meta { color: var(--muted); font-size: 12px; }
 .ok { color: var(--ok); font-weight: 500; }
@@ -100,8 +104,8 @@ def render_html(runs: list[dict[str, Any]]) -> str:
 
     Args:
         runs: payloads in the shape produced by ``AsyncBench`` — each dict has
-            ``project``, ``bench``, ``experiment``, ``case``, ``version``,
-            ``run``, ``metrics`` keys.
+            ``project``, ``bench``, ``collection_path``, ``experiment``,
+            ``case``, ``version``, ``run``, ``metrics`` keys.
 
     Returns:
         A complete HTML document (UTF-8) suitable for writing to disk.
@@ -116,12 +120,23 @@ def render_html(runs: list[dict[str, Any]]) -> str:
     errored = total - succeeded
     success_rate = (succeeded / total) * 100 if total else 0.0
 
-    by_experiment: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    # Group by (collection_path, experiment) so two experiments sharing a display
+    # name under different collections don't collapse, and each renders under its
+    # own breadcrumb. The group key is the path's keys plus the experiment key
+    # (identity); display names come from the first run in the group.
+    groups: dict[tuple[str, ...], dict[str, Any]] = {}
     for r in runs:
-        by_experiment[str(r["experiment"]["name"])].append(r)
+        path = r.get("collection_path") or []
+        exp = r["experiment"]
+        gkey = (*(str(seg["key"]) for seg in path), str(exp["key"]))
+        group = groups.get(gkey)
+        if group is None:
+            group = {"path": path, "name": str(exp["name"]), "runs": []}
+            groups[gkey] = group
+        group["runs"].append(r)
 
     sections = "\n".join(
-        _render_experiment(name, exp_runs) for name, exp_runs in by_experiment.items()
+        _render_experiment(g["name"], g["path"], g["runs"]) for g in groups.values()
     )
     timestamp = datetime.now(UTC).isoformat(timespec="seconds")
 
@@ -150,7 +165,11 @@ def render_html(runs: list[dict[str, Any]]) -> str:
     )
 
 
-def _render_experiment(name: str, runs: list[dict[str, Any]]) -> str:
+def _render_experiment(
+    name: str,
+    collection_path: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+) -> str:
     by_case: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in runs:
         by_case[str(r["case"]["name"])].append(r)
@@ -158,22 +177,32 @@ def _render_experiment(name: str, runs: list[dict[str, Any]]) -> str:
     succeeded = sum(1 for r in runs if r["run"]["status"] == "succeeded")
     errored = len(runs) - succeeded
 
-    metric_names: list[str] = []
+    # Columns are keyed by metric *key* (identity); the header shows the display
+    # name. First key seen wins ordering and its name labels the column.
+    metric_keys: list[str] = []
+    metric_labels: dict[str, str] = {}
     for r in runs:
         for m in r.get("metrics", []):
-            n = str(m["name"])
-            if n not in metric_names:
-                metric_names.append(n)
+            k = str(m["key"])
+            if k not in metric_labels:
+                metric_keys.append(k)
+                metric_labels[k] = str(m.get("name", k))
 
-    metric_headers = "".join(f"<th>{_esc(n)}</th>" for n in metric_names)
+    metric_headers = "".join(f"<th>{_esc(metric_labels[k])}</th>" for k in metric_keys)
     case_rows = "\n".join(
-        _render_case_row(case_name, case_runs, metric_names)
+        _render_case_row(case_name, case_runs, metric_keys)
         for case_name, case_runs in by_case.items()
     )
     run_blocks = "\n".join(_render_run(r) for r in runs)
 
+    breadcrumb = ""
+    if collection_path:
+        crumbs = '<span class="sep">/</span>'.join(_esc(seg["name"]) for seg in collection_path)
+        breadcrumb = f'<div class="breadcrumb">{crumbs}</div>\n'
+
     return (
         f'<section class="experiment">\n'
+        f"{breadcrumb}"
         f"<h2>{_esc(name)}</h2>\n"
         f'<div class="meta">{len(runs)} runs · '
         f'<span class="ok">{succeeded} ok</span> · '
@@ -194,7 +223,7 @@ def _render_experiment(name: str, runs: list[dict[str, Any]]) -> str:
 def _render_case_row(
     case_name: str,
     runs: list[dict[str, Any]],
-    metric_names: list[str],
+    metric_keys: list[str],
 ) -> str:
     succeeded = sum(1 for r in runs if r["run"]["status"] == "succeeded")
     errored = len(runs) - succeeded
@@ -203,10 +232,8 @@ def _render_case_row(
         status_html += f' / <span class="err">{errored}</span>'
 
     metric_cells: list[str] = []
-    for name in metric_names:
-        values = [
-            float(m["value"]) for r in runs for m in r.get("metrics", []) if m["name"] == name
-        ]
+    for key in metric_keys:
+        values = [float(m["value"]) for r in runs for m in r.get("metrics", []) if m["key"] == key]
         if values:
             cell = f"{mean(values):.3g}"
             if len(values) > 1:

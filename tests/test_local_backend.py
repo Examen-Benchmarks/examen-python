@@ -2,7 +2,7 @@
 
 Runs a tiny bench with the backend wired in, checks that close() writes a
 self-contained HTML file containing the expected case names, metric names,
-and status indicators.
+status indicators, and (for nested collections) the collection breadcrumb.
 """
 
 from pathlib import Path
@@ -13,10 +13,12 @@ from examen import (
     AsyncBench,
     AsyncScorer,
     Case,
+    Collection,
     ExactMatchScorer,
     LocalReportBackend,
     Metric,
     MetricKind,
+    Ref,
     Trace,
 )
 from examen.lib.report import render_html
@@ -31,19 +33,28 @@ class Output(BaseModel):
     result: int
 
 
-async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
-    out = tmp_path / "report.html"
-    bench = AsyncBench(
+def make_bench(out: Path, project: str = "proj", bench: str = "bench-x") -> AsyncBench:
+    return AsyncBench(
         backends=[LocalReportBackend(out)],
-        project_name="proj",
-        name="bench-x",
+        project=Ref(key="proj", name=project),
+        bench=Ref(key="bench", name=bench),
     )
 
+
+async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
+    out = tmp_path / "report.html"
+    bench = make_bench(out)
+
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
         cases=[
-            Case[Input, Output](name="ok", input=Input(a=1, b=2), output=Output(result=3)),
-            Case[Input, Output](name="bad", input=Input(a=1, b=2), output=Output(result=99)),
+            Case[Input, Output](
+                key="ok", name="ok", input=Input(a=1, b=2), output=Output(result=3)
+            ),
+            Case[Input, Output](
+                key="bad", name="bad", input=Input(a=1, b=2), output=Output(result=99)
+            ),
         ],
         scorers=[ExactMatchScorer[Input, Output]()],
         summarize_input=lambda i: f"{i.a} + {i.b}",
@@ -76,15 +87,14 @@ async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
 
 async def test_local_backend_renders_error_runs(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = AsyncBench(
-        backends=[LocalReportBackend(out)],
-        project_name="p",
-        name="b",
-    )
+    bench = make_bench(out, project="p", bench="b")
 
     @bench.experiment[Input, Output](
+        key="boom",
         name="boom",
-        cases=[Case[Input, Output](name="x", input=Input(a=0, b=0), output=Output(result=0))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=0, b=0), output=Output(result=0))
+        ],
         scorers=[],
     )
     async def boom(input: Input) -> Output:
@@ -100,15 +110,14 @@ async def test_local_backend_renders_error_runs(tmp_path: Path) -> None:
 
 async def test_local_backend_creates_parent_dirs(tmp_path: Path) -> None:
     out = tmp_path / "nested" / "deeper" / "report.html"
-    bench = AsyncBench(
-        backends=[LocalReportBackend(out)],
-        project_name="p",
-        name="b",
-    )
+    bench = make_bench(out, project="p", bench="b")
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input) -> Output:
@@ -117,6 +126,70 @@ async def test_local_backend_creates_parent_dirs(tmp_path: Path) -> None:
     await bench.run(version={"v": "1"})
 
     assert out.exists()
+
+
+async def test_nested_collections_render_breadcrumb(tmp_path: Path) -> None:
+    out = tmp_path / "report.html"
+    bench = make_bench(out, project="p", bench="b")
+
+    regression = Collection(key="regression", name="Regression")
+    translation = Collection(key="translation", name="Translation")
+    regression.include(translation)
+    bench.include(regression)
+
+    @translation.experiment[Input, Output](
+        key="bleu",
+        name="BLEU",
+        cases=[
+            Case[Input, Output](key="t", name="t", input=Input(a=2, b=3), output=Output(result=5))
+        ],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def bleu(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    body = out.read_text(encoding="utf-8")
+    assert 'class="breadcrumb"' in body
+    assert "Regression" in body
+    assert "Translation" in body
+    assert "BLEU" in body  # experiment display name
+
+
+async def test_report_aggregates_by_metric_key_labels_by_name(tmp_path: Path) -> None:
+    """Report columns are keyed by the metric *key* (identity) but headed by the
+    display *name*; repeats of the same (case, metric key) aggregate into one cell."""
+    out = tmp_path / "report.html"
+
+    class NamedScorer(AsyncScorer[Input, Output]):
+        async def score(
+            self,
+            case: Case[Input, Output],
+            trace: Trace[Input, Output],
+        ) -> list[Metric]:
+            return [Metric(key="exact_v2", name="Exact Match", kind=MetricKind.RATIO, value=1.0)]
+
+    bench = make_bench(out, project="p", bench="b")
+
+    @bench.experiment[Input, Output](
+        key="add",
+        name="add",
+        cases=[
+            Case[Input, Output](
+                key="x", name="x", input=Input(a=1, b=2), output=Output(result=3), repeats=3
+            )
+        ],
+        scorers=[NamedScorer()],
+    )
+    def add(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    body = out.read_text(encoding="utf-8")
+    assert "Exact Match" in body  # column header uses the display name
+    assert "n=3" in body  # the 3 repeats aggregate under the single metric key
 
 
 async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
@@ -130,6 +203,7 @@ async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
         ) -> list[Metric]:
             return [
                 Metric(
+                    key="judge",
                     name="judge",
                     kind=MetricKind.RATIO,
                     value=0.75,
@@ -141,15 +215,14 @@ async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
                 )
             ]
 
-    bench = AsyncBench(
-        backends=[LocalReportBackend(out)],
-        project_name="p",
-        name="b",
-    )
+    bench = make_bench(out, project="p", bench="b")
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[JudgeScorer()],
     )
     def add(input: Input) -> Output:
@@ -173,15 +246,14 @@ def test_render_html_handles_empty_runs() -> None:
 
 async def test_close_idempotent_across_repeated_run_calls(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = AsyncBench(
-        backends=[LocalReportBackend(out)],
-        project_name="p",
-        name="b",
-    )
+    bench = make_bench(out, project="p", bench="b")
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input) -> Output:

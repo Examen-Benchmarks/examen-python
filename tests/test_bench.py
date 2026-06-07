@@ -2,7 +2,8 @@
 
 Uses an in-memory FakeBackend (no live HTTP). Covers the contract that matters
 to downstream users: success/error status, repeats, DI overrides, scorer
-type-mismatch validation at decoration.
+type-mismatch validation at decoration, keyed identity, and the emitted
+collection_path for nested collections.
 """
 
 from typing import Any
@@ -12,9 +13,14 @@ from pydantic import BaseModel
 
 from examen import (
     AsyncBench,
+    AsyncScorer,
     Case,
+    Collection,
     Depends,
     ExactMatchScorer,
+    Metric,
+    MetricKind,
+    Ref,
     Trace,
 )
 
@@ -30,6 +36,14 @@ class FakeBackend:
 
     async def close(self) -> None:
         self.close_calls += 1
+
+
+def make_bench(backend: FakeBackend) -> AsyncBench:
+    return AsyncBench(
+        backends=[backend],
+        project=Ref(key="p", name="Project"),
+        bench=Ref(key="b", name="Bench"),
+    )
 
 
 class Input(BaseModel):
@@ -52,11 +66,14 @@ def make_dep() -> Dep:
 
 async def test_succeeded_run_with_matching_output_emits_metric_one() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="ok", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="ok", name="ok", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -67,16 +84,35 @@ async def test_succeeded_run_with_matching_output_emits_metric_one() -> None:
     assert len(backend.payloads) == 1
     p = backend.payloads[0]
     assert p["run"]["status"] == "succeeded"
-    assert p["metrics"] == [{"name": "exact_match", "kind": "ratio", "value": 1.0, "context": None}]
+    assert p["project"] == {"key": "p", "name": "Project", "description": None}
+    assert p["bench"] == {"key": "b", "name": "Bench", "description": None}
+    assert p["collection_path"] == []
+    assert p["experiment"] == {"key": "add", "name": "add", "description": None}
+    assert p["case"]["key"] == "ok"
+    assert p["metrics"] == [
+        {
+            "key": "exact_match",
+            "name": "exact_match",
+            "kind": "ratio",
+            "value": 1.0,
+            "context": None,
+            "description": None,
+        }
+    ]
 
 
 async def test_mismatched_output_emits_metric_zero() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="bad", input=Input(a=1, b=2), output=Output(result=99))],
+        cases=[
+            Case[Input, Output](
+                key="bad", name="bad", input=Input(a=1, b=2), output=Output(result=99)
+            )
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -89,12 +125,15 @@ async def test_mismatched_output_emits_metric_zero() -> None:
 
 async def test_repeats_produce_separate_runs() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
         cases=[
-            Case[Input, Output](name="r", input=Input(a=1, b=2), output=Output(result=3), repeats=3)
+            Case[Input, Output](
+                key="r", name="r", input=Input(a=1, b=2), output=Output(result=3), repeats=3
+            )
         ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
@@ -108,11 +147,14 @@ async def test_repeats_produce_separate_runs() -> None:
 
 async def test_function_raise_marks_run_errored() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="boom",
         name="boom",
-        cases=[Case[Input, Output](name="x", input=Input(a=0, b=0), output=Output(result=0))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=0, b=0), output=Output(result=0))
+        ],
         scorers=[],
     )
     async def boom(input: Input) -> Output:
@@ -128,11 +170,14 @@ async def test_function_raise_marks_run_errored() -> None:
 
 async def test_dependency_override_is_applied() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="dep",
         name="dep",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[],
     )
     def f(input: Input, trace: Trace[Input, Output], dep: Dep = Depends(make_dep)) -> Output:
@@ -149,7 +194,7 @@ async def test_dependency_override_is_applied() -> None:
 
 
 def test_scorer_type_mismatch_raises_at_decoration() -> None:
-    bench = AsyncBench(backends=[FakeBackend()], project_name="p", name="b")
+    bench = make_bench(FakeBackend())
 
     class OtherIn(BaseModel):
         x: int
@@ -160,6 +205,7 @@ def test_scorer_type_mismatch_raises_at_decoration() -> None:
     with pytest.raises(TypeError, match="input_type"):
 
         @bench.experiment[Input, Output](
+            key="bad",
             name="bad",
             cases=[],
             scorers=[ExactMatchScorer[OtherIn, OtherOut]()],  # type: ignore[list-item]
@@ -168,16 +214,37 @@ def test_scorer_type_mismatch_raises_at_decoration() -> None:
             return Output(result=0)
 
 
+def test_duplicate_experiment_key_raises() -> None:
+    bench = make_bench(FakeBackend())
+
+    @bench.experiment[Input, Output](key="dup", name="first", cases=[], scorers=[])
+    def f(input: Input, trace: Trace[Input, Output]) -> Output:
+        return Output(result=0)
+
+    with pytest.raises(ValueError, match="already registered"):
+
+        @bench.experiment[Input, Output](key="dup", name="second", cases=[], scorers=[])
+        def g(input: Input, trace: Trace[Input, Output]) -> Output:
+            return Output(result=0)
+
+
 def test_fans_out_to_all_backends() -> None:
     import asyncio
 
     b1 = FakeBackend()
     b2 = FakeBackend()
-    bench = AsyncBench(backends=[b1, b2], project_name="p", name="b")
+    bench = AsyncBench(
+        backends=[b1, b2],
+        project=Ref(key="p", name="Project"),
+        bench=Ref(key="b", name="Bench"),
+    )
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -189,13 +256,184 @@ def test_fans_out_to_all_backends() -> None:
     assert len(b2.payloads) == 1
 
 
-async def test_no_summarizers_means_null_summaries() -> None:
+async def test_nested_collections_emit_collection_path() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
+
+    regression = Collection(key="regression", name="Regression")
+    translation = Collection(key="translation", name="Translation")
+    regression.include(translation)
+    bench.include(regression)
+
+    # Root-mounted experiment.
+    @bench.experiment[Input, Output](
+        key="smoke",
+        name="smoke",
+        cases=[
+            Case[Input, Output](key="s", name="s", input=Input(a=1, b=1), output=Output(result=2))
+        ],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def smoke(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    # Experiment two levels deep: regression → translation.
+    @translation.experiment[Input, Output](
+        key="bleu",
+        name="BLEU",
+        cases=[
+            Case[Input, Output](key="t", name="t", input=Input(a=2, b=3), output=Output(result=5))
+        ],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def bleu(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    by_exp = {p["experiment"]["key"]: p for p in backend.payloads}
+    assert by_exp["smoke"]["collection_path"] == []
+    assert by_exp["bleu"]["collection_path"] == [
+        {"key": "regression", "name": "Regression", "description": None},
+        {"key": "translation", "name": "Translation", "description": None},
+    ]
+
+
+def test_duplicate_collection_key_raises() -> None:
+    bench = make_bench(FakeBackend())
+    bench.include(Collection(key="dup", name="First"))
+
+    with pytest.raises(ValueError, match="already included"):
+        bench.include(Collection(key="dup", name="Second"))
+
+
+async def test_same_experiment_key_under_different_collections_coexist() -> None:
+    """Experiment identity is sibling-scoped: the same key may live under two
+    different collections without colliding (benches.md invariant)."""
+    backend = FakeBackend()
+    bench = make_bench(backend)
+
+    fast = Collection(key="fast", name="Fast")
+    slow = Collection(key="slow", name="Slow")
+    bench.include(fast)
+    bench.include(slow)
+
+    @fast.experiment[Input, Output](
+        key="accuracy",
+        name="Accuracy",
+        cases=[
+            Case[Input, Output](key="c", name="c", input=Input(a=1, b=1), output=Output(result=2))
+        ],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def fast_acc(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    @slow.experiment[Input, Output](
+        key="accuracy",  # same key, different parent — allowed
+        name="Accuracy",
+        cases=[
+            Case[Input, Output](key="c", name="c", input=Input(a=2, b=2), output=Output(result=4))
+        ],
+        scorers=[ExactMatchScorer[Input, Output]()],
+    )
+    def slow_acc(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    assert len(backend.payloads) == 2
+    paths = {
+        tuple(seg["key"] for seg in p["collection_path"])
+        for p in backend.payloads
+        if p["experiment"]["key"] == "accuracy"
+    }
+    assert paths == {("fast",), ("slow",)}
+
+
+async def test_descriptions_flow_into_payload() -> None:
+    """key + name + description (D15) are emitted for every named entity, and
+    the collection_path segments carry their descriptions too."""
+    backend = FakeBackend()
+    bench = AsyncBench(
+        backends=[backend],
+        project=Ref(key="p", name="Project", description="the project"),
+        bench=Ref(key="b", name="Bench", description="the bench"),
+    )
+    group = Collection(key="g", name="Group", description="a group")
+    bench.include(group)
+
+    @group.experiment[Input, Output](
+        key="add",
+        name="Add",
+        description="adds two ints",
+        cases=[
+            Case[Input, Output](
+                key="x",
+                name="X",
+                description="a case",
+                input=Input(a=1, b=2),
+                output=Output(result=3),
+            )
+        ],
+        scorers=[],
+    )
+    def add(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    p = backend.payloads[0]
+    assert p["project"]["description"] == "the project"
+    assert p["bench"]["description"] == "the bench"
+    assert p["collection_path"] == [{"key": "g", "name": "Group", "description": "a group"}]
+    assert p["experiment"]["description"] == "adds two ints"
+    assert p["case"]["description"] == "a case"
+
+
+async def test_scorer_emits_multiple_metrics_with_distinct_keys() -> None:
+    backend = FakeBackend()
+    bench = make_bench(backend)
+
+    class MultiScorer(AsyncScorer[Input, Output]):
+        async def score(
+            self,
+            case: Case[Input, Output],
+            trace: Trace[Input, Output],
+        ) -> list[Metric]:
+            return [
+                Metric(key="count", name="Count", kind=MetricKind.COUNT, value=2.0),
+                Metric(key="ratio", name="Ratio", kind=MetricKind.RATIO, value=0.5),
+            ]
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
+        scorers=[MultiScorer()],
+    )
+    def add(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    await bench.run(version={"v": "1"})
+
+    metrics = backend.payloads[0]["metrics"]
+    assert [m["key"] for m in metrics] == ["count", "ratio"]
+    assert [m["value"] for m in metrics] == [2.0, 0.5]
+
+
+async def test_no_summarizers_means_null_summaries() -> None:
+    backend = FakeBackend()
+    bench = make_bench(backend)
+
+    @bench.experiment[Input, Output](
+        key="add",
+        name="add",
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
     )
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -210,11 +448,14 @@ async def test_no_summarizers_means_null_summaries() -> None:
 
 async def test_summarizers_appear_in_payload() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
         summarize_input=lambda i: f"{i.a} + {i.b}",
         summarize_output=lambda o: str(o.result),
@@ -231,14 +472,17 @@ async def test_summarizers_appear_in_payload() -> None:
 
 async def test_summarizer_raise_falls_back_to_repr() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     def boom(_: Input) -> str:
         raise ValueError("nope")
 
     @bench.experiment[Input, Output](
+        key="add",
         name="add",
-        cases=[Case[Input, Output](name="x", input=Input(a=1, b=2), output=Output(result=3))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
+        ],
         scorers=[ExactMatchScorer[Input, Output]()],
         summarize_input=boom,
     )
@@ -253,7 +497,7 @@ async def test_summarizer_raise_falls_back_to_repr() -> None:
 
 async def test_errored_run_skips_output_summary() -> None:
     backend = FakeBackend()
-    bench = AsyncBench(backends=[backend], project_name="p", name="b")
+    bench = make_bench(backend)
 
     summarize_output_calls: list[Any] = []
 
@@ -262,8 +506,11 @@ async def test_errored_run_skips_output_summary() -> None:
         return "called"
 
     @bench.experiment[Input, Output](
+        key="boom",
         name="boom",
-        cases=[Case[Input, Output](name="x", input=Input(a=0, b=0), output=Output(result=0))],
+        cases=[
+            Case[Input, Output](key="x", name="x", input=Input(a=0, b=0), output=Output(result=0))
+        ],
         scorers=[],
         summarize_input=lambda i: f"{i.a},{i.b}",
         summarize_output=track,
@@ -281,10 +528,11 @@ async def test_errored_run_skips_output_summary() -> None:
 
 
 def test_non_callable_summarizer_raises_at_decoration() -> None:
-    bench = AsyncBench(backends=[FakeBackend()], project_name="p", name="b")
+    bench = make_bench(FakeBackend())
 
     with pytest.raises(TypeError, match="summarize_input must be callable"):
         bench.experiment[Input, Output](
+            key="bad",
             name="bad",
             cases=[],
             scorers=[],
@@ -294,7 +542,7 @@ def test_non_callable_summarizer_raises_at_decoration() -> None:
 
 def test_experiment_without_subscript_is_not_callable() -> None:
     """The untyped form is deliberately removed — calling without subscript fails."""
-    bench = AsyncBench(backends=[FakeBackend()], project_name="p", name="b")
+    bench = make_bench(FakeBackend())
 
     with pytest.raises(TypeError, match="not callable"):
-        bench.experiment(name="x", cases=[], scorers=[])  # type: ignore[operator]
+        bench.experiment(key="x", name="x", cases=[], scorers=[])  # type: ignore[operator]

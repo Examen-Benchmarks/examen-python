@@ -2,96 +2,103 @@
 
 ## What this repo is
 
-The Python SDK for Examen, a generic benchmarking platform. Users install this library, define benchmark cases as Python classes, run them, and the SDK records results either locally (SQLite) or to a remote Go backend (`../examen-backend`).
+The Python SDK for Examen, a generic benchmarking platform. Users install this
+library, author benchmarks as typed Python (experiment functions + cases +
+scorers), run them, and the SDK records results either locally (SQLite/report)
+or to the remote Go backend (`../examen-backend`) — same data model both ways.
 
-The SDK's job is to:
+The SDK's job:
 
-1. Let users author benchmarks ergonomically (case classes + scorers).
-2. Execute runs (load cases, call `f`, apply scorers, record metrics + trace).
-3. Persist results (local SQLite or remote HTTP, same data model).
+1. Author benchmarks ergonomically (typed experiment functions, cases, scorers).
+2. Execute runs (load cases, call `f`, capture a structured trace, score after).
+3. Persist results (local or remote HTTP) via the ingest contract.
 4. Render reports (Jupyter helpers in `lib/report.py`).
 
-This is **not** an AI-specific library. AI evals are the first concrete domain; the abstractions are deliberately generic so they extend to performance benchmarks, load tests, A/B analyses, etc.
+Not AI-specific — AI evals are the first domain; the abstractions are generic so
+they extend to performance benchmarks, load tests, A/B analyses, etc.
 
-## Key design decisions (already made — do not relitigate without asking)
+## The data model is owned by `../examen-docs` — do not duplicate it here
 
-### Hierarchy
+The canonical concept reference and the locked decision log live in
+[`../examen-docs`](../examen-docs) (`concepts/*.md` + `design-decisions.md`).
+**`examen-docs` wins on any conflict.** Repo `CLAUDE.md` files previously drifted
+from the real model and caused rework — so this file points at the source of
+truth instead of restating it.
 
-```
-User → Project → Bench → (Experiment, Version) → Run → Metric
-```
-
-- **Bench** = named, time-bounded grouping of runs across many experiments. (Considered "Session" / "Campaign" / "Study" — settled on Bench.)
-- **Experiment** = function `f(case)` + its scorers. Project-scoped, reused across benches.
-- **Case** = input to `f`. 1:N with JSON files (one case class, many JSON instances). Immutable by convention.
-- **Version** = arbitrary `dict[str, str]` like `{"sdk": "1.2.3", "model": "A"}`. No fixed dimensions globally; SDK enforces schema via pydantic per experiment, server is permissive. Deduped by hash on the server.
-- **Run** = one invocation of `f(one_case)` at one version, within a bench. NOT the whole suite execution.
-- **Metric** = numeric value + `kind` enum (`pct | duration | currency | ratio | count | raw`). Optional `context` JSON for per-metric rationale (judge output, conversation excerpt, …).
-
-### Test types
-
-Two shapes only:
-
-1. **Binary** (pass/fail) — equality, schema match, contains, ordering, absence.
-2. **Scalar metric** — distance, judge score, cost, latency. Threshold optional.
-
-LLM-as-judge is **not** a third type — it's a *source* of values that feeds either shape. Use [`autoevals`](https://github.com/braintrustdata/autoevals) for off-the-shelf rubrics where they fit; write custom judges for domain-specific scoring.
-
-### Metrics are numeric-only
-
-All metric values are numbers. Display formatting is driven by the `kind` enum. Non-numeric context lives in `metrics.context` (per-metric) or `runs.trace` (per-run), never as a metric value itself.
-
-### Trace-then-score, not score-inline
-
-The bench function emits a **structured trace** (steps, intermediate state, raw output) attached to the run. Scorers run **after** against the stored trace. This enables retroactive re-scoring across historical runs — adding a scorer next month does not require re-running cases. Do not write scorers as `assert`-style inline calls inside `f`.
-
-### Setup / teardown
-
-Use DI generators (FastAPI-style `Depends(...)` with `yield`) for fixtures. pytest-style is not the model — scorers do not assert inline.
-
-### Failure ≠ low score
-
-Run status is `succeeded | failed | errored`. A run that crashes has no metric rows, not zero-valued ones. UIs and stats need to distinguish.
-
-### Repeat runs are first-class
-
-Multiple runs with the same `(version, case)` are expected. Used for non-determinism (LLM noise) and statistical comparison. The data model imposes no uniqueness constraint there.
-
-### No case versioning
-
-Cases are immutable by convention. To "change" a case, create a new one with a new name. The unique constraint is `(experiment_id, case_name)`.
-
-## Proposed layout (not yet built)
+Current hierarchy (see `examen-docs/concepts/overview.md`):
 
 ```
-examen/
-  lib/                          # reusable framework
-    base.py                     # BenchmarkCase, RunResult, Metric, ...
-    checks.py                   # Binary, Scalar primitives, registry
-    judges.py                   # LLM-as-judge wrappers (autoevals integration)
-    runner.py                   # load → run → score → persist
-    report.py                   # Jupyter helpers: load_run, render_*, compare_*
-    backends/
-      local.py                  # SQLite
-      remote.py                 # HTTP to examen-backend
-  cases/                        # concrete BenchmarkCase subclasses (user "tests")
+Team(*) → Project → Bench → Collection (nestable, bench-scoped) → Experiment → Case
+Run → (bench, experiment, case, version) → Metric
 ```
 
-## Open questions / TBD
+(*) teams deferred — the SDK sends no `user_id`/team; the server resolves the
+caller from `Authorization: Bearer <api_key>` (D9).
 
-- Wire format between SDK and Go backend (REST/JSON expected; schema not yet finalized).
-- Scorer registration model: code-defined for now; possibly server-registered later for SaaS.
-- Trace size limits (small jsonb today; blob store eventually for large traces).
-- User/auth model on the SaaS path.
+Decisions that shape SDK code (full text in `examen-docs/design-decisions.md`):
+
+- **D15 — every named entity has a client-supplied `key` + display `name` +
+  optional `description`.** `key` is the stable, rename-safe business key that
+  find-or-create / ingest resolve by; `name` is a free-form label. Applies to
+  projects, benches, collections, experiments, cases, metrics. Versions and runs
+  have no name → no key.
+- **D2 — collections** are a bench-scoped nestable tree (the `APIRouter` to the
+  bench's `app`): `@bench.experiment` = root-mounted, `@collection.experiment` =
+  under a collection.
+- **D4 / D5 — no iteration entity.** Repeated runs of the same `(version, case)`
+  ARE the iterations (each repeat is its own run row; aggregation is read-time).
+  The SDK models this with `Case.repeats`. Note the vocabulary trap: the model's
+  "run" is the leaf (one `f(case)`); a "benchmark result for an experiment at a
+  version" is a *group* of runs, not a row. Don't add an iteration object.
+- **D8 — cases immutable, first-write-wins by `key`.** A later run with a
+  different payload under the same case key **reuses** the existing case (payload
+  ignored, not a 409).
+- **D6 — failure ≠ low score** (failed/errored runs carry an error message and
+  zero metric rows). **D10 — metrics numeric only** (non-numeric → `metric.context`
+  or `run.trace`; scorer identity is `(experiment, metric key)`).
+
+## SDK-specific design (not in examen-docs — preserve these)
+
+- **Trace-then-score, never inline.** The experiment function emits a structured
+  `Trace`; scorers run *after*, against the stored trace, so historical runs can
+  be re-scored by adding a scorer later. No `assert`-style scoring inside `f`.
+- **DI via FastAPI-style `Depends(...)` generators** (`lib/depends.py`) for
+  fixtures/setup-teardown. pytest-style is not the model.
+- **Pydantic for every user-facing schema.** Free-form `dict` only at the JSON
+  storage boundary (case payload, version components, trace, metric context).
+- **Mandatory-subscript experiment decorator** — `@bench.experiment[In, Out](...)`;
+  there is intentionally no untyped form (the subscript type-checks
+  cases/scorers/summarizers against the function signature).
+- **Backends fan out.** A bench holds N backends (`lib/backends/`: `http.py`
+  Connector → `POST /ingest/runs`; `local.py` LocalReportBackend → SQLite/HTML);
+  each completed run goes to all of them, same payload.
+- **Async-only today** (`AsyncBench`/`AsyncScorer`). `SyncBench`/`Bench` are
+  planned, not built — don't add them unprompted.
+
+## Status
+
+The SDK is mid-migration from the old name-based model to the keys + collections
+model above. The one-time build plan is
+[`../examen-docs/SDK-REDESIGN-PLAN.md`](../examen-docs/SDK-REDESIGN-PLAN.md) —
+follow it for that work; it is transient and will be removed once done.
+
+## Build / test commands
+
+- `make check` — the canonical gate: `ruff` (format-check + lint + import sort),
+  `mypy --strict`, then `pytest` with coverage. Run before declaring done.
+- `make lint` — autofix. `make build` — `mypy --strict` + `uv lock`.
+  `make test` — pytest + coverage (`htmlcov/`). (`make run` is a stale template
+  leftover — ignore it.)
 
 ## Conventions for AI assistants working here
 
-- **Pydantic for all user-facing schemas.** Free-form `dict` only at the JSON storage boundary.
-- **Don't add features speculatively.** The data model is small on purpose. Confirm with the user before extending.
-- **Don't write CLAUDE.md or README.md** unless asked.
-- **Don't commit changes unless asked.**
+- **`examen-docs` is canonical** — read it; don't restate or fork the model here.
+- **Pydantic for all user-facing schemas.** Free-form `dict` only at the JSON boundary.
+- **Don't add features speculatively.** The model is small on purpose; confirm extensions.
+- **Don't write CLAUDE.md or README.md** unless asked. **Don't commit** unless asked.
 
 ## Related repos
 
-- `../examen-backend` — Go API server.
-- `../examen-db` — Postgres migrations (golang-migrate).
+- `../examen-docs` — canonical concepts + locked decision log (wins on conflict).
+- `../examen-backend` — Go API server; owns the OpenAPI spec and ingest endpoint.
+- `../examen-db` — Postgres schema (Atlas; `schema.sql` is the readable snapshot).

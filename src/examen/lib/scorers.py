@@ -101,7 +101,8 @@ class AsyncScorer(Scorer[InputT, OutputT], ABC):
     A single scoring pass can emit multiple metrics — return the full list. A
     scorer that produces one metric returns a one-element list. An empty list
     is allowed (e.g. a guard scorer that only reports on certain conditions).
-    Metric names must be unique within an experiment.
+    Each metric carries a `key` (its scorer identity) that must be unique within
+    a run; the implicit scorer identity is (experiment, metric key).
     """
 
     @abstractmethod
@@ -121,6 +122,7 @@ class ExactMatchScorer(AsyncScorer[InputT, OutputT]):
         match = trace.output == case.output
         return [
             Metric(
+                key="exact_match",
                 name="exact_match",
                 kind=MetricKind.RATIO,
                 value=1.0 if match else 0.0,

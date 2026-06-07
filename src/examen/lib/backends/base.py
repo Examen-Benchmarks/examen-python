@@ -9,8 +9,8 @@ class Backend(Protocol):
 
     Implementations: `Connector` (HTTP to examen-backend), `LocalReportBackend`
     (offline self-contained HTML). Local SQLite is planned. All backends accept
-    the same self-contained payload (project, bench, experiment, case, version,
-    run, metrics) and find-or-create parents by name.
+    the same self-contained keyed payload (project, bench, collection_path,
+    experiment, case, version, run, metrics) and find-or-create parents by key.
 
     The bench calls ``close()`` on every backend at the end of ``run()``, fanned
     out in parallel. Use it to flush buffered state, render artifacts, or close

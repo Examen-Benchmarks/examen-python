@@ -36,10 +36,37 @@ class RunStatus(StrEnum):
     ERRORED = "errored"
 
 
+class Ref(BaseModel):
+    """A reference to a named entity: stable `key` + display `name` + optional `description`.
+
+    Per design-decision D15, every named entity (project, bench, collection,
+    experiment, case, metric) carries a client-supplied **`key`** — the stable,
+    rename-safe business key that find-or-create and ingest resolve by — plus a
+    free-form display **`name`** and an optional **`description`**. On ingest the
+    `name`/`description` are applied on first create and ignored on reuse
+    (first-write-wins); only the `key` participates in identity.
+
+    Used for the project, bench, and each `collection_path` segment in the ingest
+    payload. Experiments and cases carry the same trio but add their own fields.
+    """
+
+    key: str = Field(description="Stable, rename-safe business key. Identity for find-or-create.")
+    name: str = Field(description="Free-form display label.")
+    description: str | None = Field(
+        default=None, description="Optional longer description, applied on first create."
+    )
+
+
 class Metric(BaseModel):
     """A numeric measurement emitted by a scorer for a single run."""
 
-    name: str = Field(description="Scorer-defined identifier, unique within an experiment.")
+    key: str = Field(
+        description=(
+            "Scorer-defined identity, unique per run. The implicit scorer identity is "
+            "(experiment, metric key) — the key, not the name."
+        )
+    )
+    name: str = Field(description="Display label for the metric.")
     kind: MetricKind = Field(description="How the value should be interpreted/displayed.")
     value: float = Field(description="The numeric measurement.")
     context: dict[str, Any] | None = Field(
@@ -49,19 +76,31 @@ class Metric(BaseModel):
             "Free-form JSON, stored verbatim by the backend."
         ),
     )
+    description: str | None = Field(
+        default=None, description="Optional longer description, applied on first create."
+    )
 
 
 class Case(BaseModel, Generic[InputT, OutputT]):
     """Immutable input fixture for an experiment.
 
     Cases are reused across versions and benches. Their identity within an
-    experiment is the (experiment, name) pair; reusing a name with a different
-    payload is a server-side conflict (HTTP 409).
+    experiment is the (experiment, key) pair. Cases are **first-write-wins by
+    key**: re-running with a different payload (or name/description) under the
+    same case key reuses the existing case — the new values are ignored, not
+    rejected with a 409. Keeping payloads consistent for a given case key is the
+    client's responsibility.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    name: str = Field(description="Unique identifier within the experiment.")
+    key: str = Field(
+        description="Stable identity within the experiment; (experiment, key) is unique."
+    )
+    name: str = Field(description="Display label for the case.")
+    description: str | None = Field(
+        default=None, description="Optional longer description, applied on first create."
+    )
     input: InputT = Field(description="The input passed to the experiment function.")
     output: OutputT = Field(
         description=(
