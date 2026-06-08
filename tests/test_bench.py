@@ -424,6 +424,123 @@ async def test_scorer_emits_multiple_metrics_with_distinct_keys() -> None:
     assert [m["value"] for m in metrics] == [2.0, 0.5]
 
 
+def _tree_bench(backend: FakeBackend) -> AsyncBench:
+    """A 3-experiment tree:
+
+    bench
+    ├── smoke                       (root)
+    └── regression
+        ├── latency
+        └── translation
+            └── bleu
+    """
+    bench = make_bench(backend)
+
+    regression = Collection(key="regression", name="Regression")
+    translation = Collection(key="translation", name="Translation")
+    regression.include(translation)
+    bench.include(regression)
+
+    @bench.experiment[Input, Output](
+        key="smoke",
+        name="smoke",
+        cases=[
+            Case[Input, Output](key="s", name="s", input=Input(a=1, b=1), output=Output(result=2))
+        ],
+        scorers=[],
+    )
+    def smoke(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    @regression.experiment[Input, Output](
+        key="latency",
+        name="latency",
+        cases=[
+            Case[Input, Output](key="l", name="l", input=Input(a=1, b=2), output=Output(result=3))
+        ],
+        scorers=[],
+    )
+    def latency(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    @translation.experiment[Input, Output](
+        key="bleu",
+        name="BLEU",
+        cases=[
+            Case[Input, Output](key="t", name="t", input=Input(a=2, b=3), output=Output(result=5))
+        ],
+        scorers=[],
+    )
+    def bleu(input: Input) -> Output:
+        return Output(result=input.a + input.b)
+
+    return bench
+
+
+def _ran(backend: FakeBackend) -> set[str]:
+    return {p["experiment"]["key"] for p in backend.payloads}
+
+
+async def test_select_none_runs_everything() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"})
+    assert _ran(backend) == {"smoke", "latency", "bleu"}
+
+
+async def test_select_single_root_experiment() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"}, select="smoke")
+    assert _ran(backend) == {"smoke"}
+
+
+async def test_select_collection_runs_subtree() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"}, select="regression")
+    assert _ran(backend) == {"latency", "bleu"}
+
+
+async def test_select_nested_collection_runs_its_subtree() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"}, select="regression/translation")
+    assert _ran(backend) == {"bleu"}
+
+
+async def test_select_full_path_runs_single_nested_experiment() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"}, select="regression/translation/bleu")
+    assert _ran(backend) == {"bleu"}
+
+
+async def test_select_accepts_multiple_selectors() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    await bench.run(version={"v": "1"}, select=["smoke", "regression/translation"])
+    assert _ran(backend) == {"smoke", "bleu"}
+
+
+async def test_select_unknown_raises_and_touches_no_backend() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    with pytest.raises(ValueError, match="matched no experiments"):
+        await bench.run(version={"v": "1"}, select="nope")
+    # Validation happens before any backend is touched: no runs, no close().
+    assert backend.payloads == []
+    assert backend.close_calls == 0
+
+
+async def test_select_partial_unknown_in_list_raises() -> None:
+    backend = FakeBackend()
+    bench = _tree_bench(backend)
+    with pytest.raises(ValueError, match="regression/typo"):
+        await bench.run(version={"v": "1"}, select=["smoke", "regression/typo"])
+    assert backend.payloads == []
+
+
 async def test_no_summarizers_means_null_summaries() -> None:
     backend = FakeBackend()
     bench = make_bench(backend)

@@ -44,10 +44,31 @@ class AsyncBench(_ExperimentHost):
         self,
         version: dict[str, str],
         dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
+        select: str | Sequence[str] | None = None,
     ) -> None:
+        """Run the bench, optionally restricted to part of the tree.
+
+        ``select`` is a pytest-style node selector (or list of them) over the
+        experiment's key path — its ``collection_path`` keys plus its own key,
+        joined by ``/``. A selector that names a **collection** runs that whole
+        subtree; one that names a full path runs a **single experiment**::
+
+            await bench.run(version, select="regression")               # subtree
+            await bench.run(version, select="regression/translation/bleu")  # one experiment
+            await bench.run(version, select=["smoke", "regression/translation"])
+
+        Matching is by key prefix. ``select=None`` runs everything. A selector
+        that matches no experiment raises ``ValueError`` (typo guard), and the
+        check happens before any backend is touched so a bad selector produces
+        no report.
+        """
         overrides = dependency_overrides or {}
+        plan = list(self._iter_experiments([]))
+        selectors = _parse_selectors(select)
+        if selectors is not None:
+            plan = _select(plan, selectors)
         try:
-            for exp, collection_path in self._iter_experiments([]):
+            for exp, collection_path in plan:
                 for case in exp.cases:
                     for _ in range(case.repeats):
                         await self._run_one(exp, collection_path, case, version, overrides)
@@ -137,6 +158,58 @@ class AsyncBench(_ExperimentHost):
         }
 
         await asyncio.gather(*(b.ingest_run(payload) for b in self.backends))
+
+
+def _parse_selectors(select: str | Sequence[str] | None) -> list[list[str]] | None:
+    """Normalise the ``select`` argument into a list of key paths.
+
+    ``None`` (or an empty list) means "no filter — run everything". A string is
+    split on ``/`` into key segments; a sequence of strings yields several paths.
+    Empty individual selectors (``""``, ``"/"``) are rejected as typos.
+    """
+    if select is None:
+        return None
+    raw = [select] if isinstance(select, str) else list(select)
+    parsed: list[list[str]] = []
+    for sel in raw:
+        segments = [seg for seg in sel.split("/") if seg]
+        if not segments:
+            raise ValueError(f"Invalid empty selector: {sel!r}")
+        parsed.append(segments)
+    return parsed or None
+
+
+def _select(
+    plan: list[tuple[_Experiment, list[Ref]]],
+    selectors: list[list[str]],
+) -> list[tuple[_Experiment, list[Ref]]]:
+    """Keep only experiments whose key path is prefix-matched by a selector.
+
+    An experiment's key path is its ``collection_path`` keys followed by its own
+    key. A selector matches when it equals a prefix of that path, so a collection
+    selector pulls in its whole subtree and a full-path selector pulls in exactly
+    one experiment. Raises if any selector matched nothing.
+    """
+    matched = [False] * len(selectors)
+    chosen: list[tuple[_Experiment, list[Ref]]] = []
+    for exp, collection_path in plan:
+        node_keys = [seg.key for seg in collection_path]
+        node_keys.append(exp.key)
+        keep = False
+        for i, segments in enumerate(selectors):
+            if node_keys[: len(segments)] == segments:
+                matched[i] = True
+                keep = True
+        if keep:
+            chosen.append((exp, collection_path))
+
+    unmatched = ["/".join(selectors[i]) for i, ok in enumerate(matched) if not ok]
+    if unmatched:
+        raise ValueError(
+            f"select matched no experiments: {unmatched}. Use the key path, "
+            f"e.g. 'collection/sub/experiment' (collection keys then experiment key)."
+        )
+    return chosen
 
 
 def _safe_summarize(
