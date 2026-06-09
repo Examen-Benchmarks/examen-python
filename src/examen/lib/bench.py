@@ -45,6 +45,7 @@ class AsyncBench(_ExperimentHost):
         version: dict[str, str],
         dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
         select: str | Sequence[str] | None = None,
+        concurrency: int = 15,
     ) -> None:
         """Run the bench, optionally restricted to part of the tree.
 
@@ -61,17 +62,40 @@ class AsyncBench(_ExperimentHost):
         that matches no experiment raises ``ValueError`` (typo guard), and the
         check happens before any backend is touched so a bad selector produces
         no report.
+
+        ``concurrency`` bounds how many **runs** (one ``f(case)`` for one repeat,
+        the leaf unit) execute at once, across all experiments / cases / repeats.
+        The default of 15 overlaps the I/O-bound waits typical of eval workloads;
+        pass ``concurrency=1`` for fully serial execution. Each run is isolated
+        (its own ``Trace`` and dependency scope), so overlap is safe; only the
+        order runs reach the backends becomes nondeterministic, which read-time
+        aggregation does not depend on.
         """
+        if concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+
         overrides = dependency_overrides or {}
         plan = list(self._iter_experiments([]))
         selectors = _parse_selectors(select)
         if selectors is not None:
             plan = _select(plan, selectors)
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _bounded(
+            exp: _Experiment, collection_path: list[Ref], case: Case[Any, Any]
+        ) -> None:
+            async with semaphore:
+                await self._run_one(exp, collection_path, case, version, overrides)
+
+        runs = [
+            _bounded(exp, collection_path, case)
+            for exp, collection_path in plan
+            for case in exp.cases
+            for _ in range(case.repeats)
+        ]
         try:
-            for exp, collection_path in plan:
-                for case in exp.cases:
-                    for _ in range(case.repeats):
-                        await self._run_one(exp, collection_path, case, version, overrides)
+            await asyncio.gather(*runs)
         finally:
             # Backends with end-of-run artifacts (LocalReportBackend writes its
             # HTML here) need a finalize hook. The HTTP Connector's close() is

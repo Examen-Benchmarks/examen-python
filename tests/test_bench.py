@@ -6,6 +6,7 @@ type-mismatch validation at decoration, keyed identity, and the emitted
 collection_path for nested collections.
 """
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -229,8 +230,6 @@ def test_duplicate_experiment_key_raises() -> None:
 
 
 def test_fans_out_to_all_backends() -> None:
-    import asyncio
-
     b1 = FakeBackend()
     b2 = FakeBackend()
     bench = AsyncBench(
@@ -539,6 +538,77 @@ async def test_select_partial_unknown_in_list_raises() -> None:
     with pytest.raises(ValueError, match="regression/typo"):
         await bench.run(version={"v": "1"}, select=["smoke", "regression/typo"])
     assert backend.payloads == []
+
+
+async def test_runs_execute_concurrently() -> None:
+    """A barrier that only releases once all N runs have arrived deadlocks under
+    serial execution — completing it proves the runs overlap."""
+    backend = FakeBackend()
+    bench = make_bench(backend)
+    n = 5
+    barrier = asyncio.Barrier(n)
+
+    @bench.experiment[Input, Output](
+        key="c",
+        name="c",
+        cases=[
+            Case[Input, Output](
+                key=f"k{i}", name=f"k{i}", input=Input(a=i, b=0), output=Output(result=i)
+            )
+            for i in range(n)
+        ],
+        scorers=[],
+    )
+    async def f(input: Input) -> Output:
+        await barrier.wait()  # only all-N-arrived releases this
+        return Output(result=input.a)
+
+    # Times out (rather than hanging forever) if execution is serial.
+    await asyncio.wait_for(bench.run(version={"v": "1"}, concurrency=n), timeout=5)
+    assert len(backend.payloads) == n
+
+
+async def test_concurrency_limit_is_respected() -> None:
+    backend = FakeBackend()
+    bench = make_bench(backend)
+    limit = 3
+    n = 9
+    active = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    @bench.experiment[Input, Output](
+        key="c",
+        name="c",
+        cases=[
+            Case[Input, Output](
+                key=f"k{i}", name=f"k{i}", input=Input(a=i, b=0), output=Output(result=i)
+            )
+            for i in range(n)
+        ],
+        scorers=[],
+    )
+    async def f(input: Input) -> Output:
+        nonlocal active, peak
+        async with lock:
+            active += 1
+            peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        async with lock:
+            active -= 1
+        return Output(result=input.a)
+
+    await bench.run(version={"v": "1"}, concurrency=limit)
+
+    assert len(backend.payloads) == n
+    assert peak <= limit  # the semaphore caps in-flight runs
+    assert peak > 1  # but they really do overlap
+
+
+def test_invalid_concurrency_raises() -> None:
+    bench = make_bench(FakeBackend())
+    with pytest.raises(ValueError, match="concurrency must be >= 1"):
+        asyncio.run(bench.run(version={"v": "1"}, concurrency=0))
 
 
 async def test_no_summarizers_means_null_summaries() -> None:
