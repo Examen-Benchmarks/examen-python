@@ -1,16 +1,11 @@
 [project]
 name = "examen"
-version = "0.0.11"
+version = "0.0.12"
 description = "Python SDK for Examen, a generic benchmarking platform."
 readme = "README.md"
-authors = [
-    { name = "Célestin Cordos", email = "celestin.cordos@outlook.fr" }
-]
+authors = [{ name = "Célestin Cordos", email = "celestin.cordos@outlook.fr" }]
 requires-python = ">=3.12"
-dependencies = [
-    "httpx>=0.28.1",
-    "pydantic>=2.13.3",
-]
+dependencies = ["httpx>=0.28.1", "pydantic>=2.13.3"]
 
 [build-system]
 requires = ["uv_build>=0.8.13,<0.9.0"]
@@ -33,10 +28,10 @@ extend-exclude = ["src/examen/example.py"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "RUF", "SIM"]
 ignore = [
-    "E501",   # line length handled by formatter
-    "UP046",  # keep Generic[T] syntax; pydantic generics + PEP 695 still has rough edges
-    "UP047",  # same — keep TypeVar-based generics for consistency
-    "B008",   # Depends(...) in defaults is the whole point of the DI API (FastAPI convention)
+    "E501",  # line length handled by formatter
+    "UP046", # keep Generic[T] syntax; pydantic generics + PEP 695 still has rough edges
+    "UP047", # same — keep TypeVar-based generics for consistency
+    "B008",  # Depends(...) in defaults is the whole point of the DI API (FastAPI convention)
 ]
 
 [tool.ruff.format]

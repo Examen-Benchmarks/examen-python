@@ -42,7 +42,7 @@ class AsyncBench(_ExperimentHost):
 
     async def run(
         self,
-        version: dict[str, str],
+        version: dict[str, Any],
         dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
         select: str | Sequence[str] | None = None,
         concurrency: int = 15,
