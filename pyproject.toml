@@ -7,6 +7,9 @@ authors = [{ name = "Célestin Cordos", email = "celestin.cordos@outlook.fr" }]
 requires-python = ">=3.12"
 dependencies = ["httpx>=0.28.1", "pydantic>=2.13.3"]
 
+[project.scripts]
+examen = "examen.cli.main:main"
+
 [build-system]
 requires = ["uv_build>=0.8.13,<0.9.0"]
 build-backend = "uv_build"

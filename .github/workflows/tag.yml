@@ -1,0 +1,36 @@
+# Golden Standard — auto-tag on version bump (tag half only).
+#
+# examen-python is a git-installed library, not a deployed image, so only the
+# standard's `tag-on-version-bump` job applies — there is no build/registry/k8s
+# half. Bump `version` in pyproject.toml on master → this pushes the matching
+# `vX.Y.Z` git tag, which downstream repos pin against
+# (examen @ git+https://.../examen-python.git@vX.Y.Z). Or tag by hand:
+# `git tag vX.Y.Z && git push --tags` — same result.
+#
+# Required repo secret: TAG_PUSH_TOKEN (fine-grained PAT with contents:write).
+# The default GITHUB_TOKEN is NOT usable here for the standard's reason (it
+# would matter if a tag-triggered build existed); the PAT is the standard.
+
+name: tag
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  tag-on-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.TAG_PUSH_TOKEN }}   # PAT, NOT GITHUB_TOKEN
+      - name: Push v-tag if pyproject version bumped
+        run: |
+          version=$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)"/\1/')
+          TAG="v${version}"
+          git rev-parse "$TAG" >/dev/null 2>&1 && { echo "Tag exists — nothing to do."; exit 0; }
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"

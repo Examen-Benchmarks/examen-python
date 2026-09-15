@@ -1,23 +1,17 @@
-"""`AsyncBench`: register experiments, run them, ship results to backends.
-
-The current implementation is async-only. Sync (`SyncBench`) and an
-auto-detecting `Bench` facade are planned but not yet shipped.
-
-A bench is the root of a collection tree (the FastAPI `app`): experiments are
-mounted at the root with ``@bench.experiment[In, Out](...)`` or under a
-`Collection` included via ``bench.include(collection)``. At ``run()`` the bench
-walks every subtree, computes each experiment's ``collection_path``, and fans
-the resulting payload out to all backends in parallel. Backends share the same
-keyed data model so a run can be recorded locally and remotely at once.
-"""
+"""Typed benchmark definitions and execution with durable local JSON results."""
 
 import asyncio
 import inspect
+import json
+import re
 from collections.abc import Callable, Sequence
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from examen.artifacts import ExperimentInfo, RunProgress, RunResult, save_run, write_record
 from examen.lib.backends.base import Backend
 from examen.lib.base import Case, Metric, Ref, RunStatus
 from examen.lib.depends import solve
@@ -28,9 +22,10 @@ from examen.lib.trace import Trace
 class AsyncBench(_ExperimentHost):
     def __init__(
         self,
-        backends: Sequence[Backend],
         project: Ref,
         bench: Ref,
+        *,
+        backends: Sequence[Backend] = (),
     ) -> None:
         super().__init__()
         # `Sequence[Backend]` (covariant) so callers can pass a concrete
@@ -46,7 +41,11 @@ class AsyncBench(_ExperimentHost):
         dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] | None = None,
         select: str | Sequence[str] | None = None,
         concurrency: int = 15,
-    ) -> None:
+        *,
+        output_dir: str | Path = ".examen/results",
+        filter_pattern: str | None = None,
+        on_progress: Callable[[RunProgress], None] | None = None,
+    ) -> RunResult:
         """Run the bench, optionally restricted to part of the tree.
 
         ``select`` is a pytest-style node selector (or list of them) over the
@@ -75,42 +74,137 @@ class AsyncBench(_ExperimentHost):
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
 
         overrides = dependency_overrides or {}
-        plan = list(self._iter_experiments([]))
-        selectors = _parse_selectors(select)
-        if selectors is not None:
-            plan = _select(plan, selectors)
-
+        plan = self._plan(select, filter_pattern)
+        version = json.loads(json.dumps(version, allow_nan=False))
+        # Validate JSON and create the artifact before incurring execution costs.
+        execution_id = str(uuid4())
+        directory = Path(output_dir).resolve() / execution_id
+        result = RunResult(
+            execution_id=execution_id,
+            path=directory,
+            project_key=self.project.key,
+            bench_key=self.bench.key,
+            version=version,
+            total=sum(case.repeats for exp, _ in plan for case in exp.cases),
+        )
+        directory.mkdir(parents=True, exist_ok=False)
+        write_record(directory / "manifest.json", result)
         semaphore = asyncio.Semaphore(concurrency)
+        backend_errors: list[BaseException] = []
 
         async def _bounded(
             exp: _Experiment, collection_path: list[Ref], case: Case[Any, Any]
         ) -> None:
             async with semaphore:
-                await self._run_one(exp, collection_path, case, version, overrides)
+                payload = await self._run_one(exp, collection_path, case, version, overrides)
+                # Save before any optional report sink or progress callback.
+                save_run(directory / "runs", payload)
+                result.completed += 1
+                if payload["run"]["status"] == RunStatus.SUCCEEDED:
+                    result.succeeded += 1
+                else:
+                    result.errored += 1
+                if on_progress is not None:
+                    on_progress(
+                        RunProgress(
+                            completed=result.completed,
+                            total=result.total,
+                            succeeded=result.succeeded,
+                            errored=result.errored,
+                            experiment="/".join([seg.key for seg in collection_path] + [exp.key]),
+                            case=case.key,
+                        )
+                    )
+                responses = await asyncio.gather(
+                    *(b.ingest_run(payload) for b in self.backends),
+                    return_exceptions=True,
+                )
+                backend_errors.extend(r for r in responses if isinstance(r, BaseException))
 
-        runs = [
-            _bounded(exp, collection_path, case)
-            for exp, collection_path in plan
-            for case in exp.cases
-            for _ in range(case.repeats)
-        ]
         try:
-            await asyncio.gather(*runs)
+            # TaskGroup settles all child tasks before the manifest is finalized,
+            # including when interrupted or when a local write fails.
+            async with asyncio.TaskGroup() as tasks:
+                for exp, collection_path in plan:
+                    for case in exp.cases:
+                        for _ in range(case.repeats):
+                            tasks.create_task(_bounded(exp, collection_path, case))
+            result.status = "completed"
+        except asyncio.CancelledError:
+            result.status = "interrupted"
+            raise
+        except BaseException:
+            result.status = "error"
+            raise
         finally:
-            # Backends with end-of-run artifacts (LocalReportBackend writes its
-            # HTML here) need a finalize hook. The HTTP Connector's close() is
-            # a no-op. Run in finally so artifacts are produced even if a run
-            # raised through.
-            await asyncio.gather(*(b.close() for b in self.backends))
+            try:
+                responses = await asyncio.gather(
+                    *(b.close() for b in self.backends),
+                    return_exceptions=True,
+                )
+                backend_errors.extend(r for r in responses if isinstance(r, BaseException))
+                if backend_errors:
+                    result.status = "error"
+            finally:
+                result.finished_at = datetime.now(UTC)
+                write_record(directory / "manifest.json", result)
+        if backend_errors:
+            raise RuntimeError(
+                f"Report backend failed; results are saved in {directory}"
+            ) from backend_errors[0]
+        return result
+
+    def list_experiments(
+        self,
+        select: str | Sequence[str] | None = None,
+        filter_pattern: str | None = None,
+    ) -> list[ExperimentInfo]:
+        """Inspect the execution plan without invoking experiments or backends.
+
+        A regex filter matches project/bench/collection/experiment keys or the
+        experiment's display name. ``select`` retains the SDK's prefix selectors.
+        """
+        return [
+            ExperimentInfo(
+                path="/".join([seg.key for seg in path] + [exp.key]),
+                name=exp.name,
+                cases=len(exp.cases),
+                runs=sum(c.repeats for c in exp.cases),
+            )
+            for exp, path in self._plan(select, filter_pattern)
+        ]
+
+    def _plan(
+        self,
+        select: str | Sequence[str] | None,
+        filter_pattern: str | None,
+    ) -> list[tuple[_Experiment, list[Ref]]]:
+        plan = list(self._iter_experiments([]))
+        selectors = _parse_selectors(select)
+        if selectors is not None:
+            plan = _select(plan, selectors)
+        if filter_pattern is not None:
+            pattern = re.compile(filter_pattern)
+            plan = [
+                (exp, path)
+                for exp, path in plan
+                if pattern.search(
+                    "/".join(
+                        [self.project.key, self.bench.key] + [seg.key for seg in path] + [exp.key]
+                    )
+                )
+                or pattern.search(exp.name)
+            ]
+        return plan
 
     async def _run_one(
         self,
         exp: _Experiment,
         collection_path: list[Ref],
         case: Case[Any, Any],
-        version: dict[str, str],
+        version: dict[str, Any],
         overrides: dict[Callable[..., Any], Callable[..., Any]],
-    ) -> None:
+    ) -> dict[str, Any]:
         trace: Trace[Any, Any] = Trace(
             case_name=case.name,
             input=case.input,
@@ -171,6 +265,7 @@ class AsyncBench(_ExperimentHost):
             },
             "version": {"components": version},
             "run": {
+                "id": str(uuid4()),
                 "status": status.value,
                 "trace": trace.model_dump(mode="json"),
                 "started_at": trace.started_at.isoformat() if trace.started_at else None,
@@ -181,7 +276,7 @@ class AsyncBench(_ExperimentHost):
             "metrics": [m.model_dump(mode="json") for m in metrics],
         }
 
-        await asyncio.gather(*(b.ingest_run(payload) for b in self.backends))
+        return payload
 
 
 def _parse_selectors(select: str | Sequence[str] | None) -> list[list[str]] | None:

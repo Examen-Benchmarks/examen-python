@@ -1,5 +1,5 @@
+from examen.artifacts import ExperimentInfo, RunProgress, RunResult, SyncResult
 from examen.lib.backends.base import Backend
-from examen.lib.backends.http import Connector
 from examen.lib.backends.local import LocalReportBackend
 from examen.lib.base import Case, Metric, MetricKind, Ref, RunStatus
 from examen.lib.bench import AsyncBench
@@ -14,16 +14,19 @@ __all__ = [
     "Backend",
     "Case",
     "Collection",
-    "Connector",
     "Depends",
     "ExactMatchScorer",
+    "ExperimentInfo",
     "LLMAsAJudgeScorer",
     "LocalReportBackend",
     "Metric",
     "MetricKind",
     "Ref",
+    "RunProgress",
+    "RunResult",
     "RunStatus",
     "Scorer",
+    "SyncResult",
     "Trace",
     "TraceStep",
 ]

@@ -7,10 +7,9 @@ from typing import Any, Protocol, runtime_checkable
 class Backend(Protocol):
     """A sink for ingested runs.
 
-    Implementations: `Connector` (HTTP to examen-backend), `LocalReportBackend`
-    (offline self-contained HTML). Local SQLite is planned. All backends accept
-    the same self-contained keyed payload (project, bench, collection_path,
-    experiment, case, version, run, metrics) and find-or-create parents by key.
+    Optional sinks such as `LocalReportBackend` receive the same self-contained
+    keyed payload after the runner has saved it to JSON. HTTP uploading is a
+    separate operation in `examen.upload`, not a benchmark backend.
 
     The bench calls ``close()`` on every backend at the end of ``run()``, fanned
     out in parallel. Use it to flush buffered state, render artifacts, or close

@@ -21,6 +21,7 @@ wheels/
 .coverage
 .coverage.*
 htmlcov/
+.examen/
 
 # Editors / IDE
 .idea/
