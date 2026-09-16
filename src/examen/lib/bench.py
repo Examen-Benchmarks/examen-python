@@ -28,10 +28,7 @@ class AsyncBench(_ExperimentHost):
         backends: Sequence[Backend] = (),
     ) -> None:
         super().__init__()
-        # `Sequence[Backend]` (covariant) so callers can pass a concrete
-        # `list[LocalReportBackend]` without the type-checker rejecting it
-        # under list invariance. We copy into a list to own the storage.
-        self.backends: list[Backend] = list(backends)
+        self.backends = list(backends)
         self.project = project
         self.bench = bench
 
@@ -45,6 +42,7 @@ class AsyncBench(_ExperimentHost):
         output_dir: str | Path = ".examen/results",
         filter_pattern: str | None = None,
         on_progress: Callable[[RunProgress], None] | None = None,
+        on_run_saved: Callable[[Path], Any] | None = None,
     ) -> RunResult:
         """Run the bench, optionally restricted to part of the tree.
 
@@ -99,6 +97,12 @@ class AsyncBench(_ExperimentHost):
                 payload = await self._run_one(exp, collection_path, case, version, overrides)
                 # Save before any optional report sink or progress callback.
                 save_run(directory / "runs", payload)
+                if on_run_saved is not None:
+                    callback_result = on_run_saved(
+                        directory / "runs" / f"{payload['run']['id']}.json"
+                    )
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
                 result.completed += 1
                 if payload["run"]["status"] == RunStatus.SUCCEEDED:
                     result.succeeded += 1
@@ -116,8 +120,7 @@ class AsyncBench(_ExperimentHost):
                         )
                     )
                 responses = await asyncio.gather(
-                    *(b.ingest_run(payload) for b in self.backends),
-                    return_exceptions=True,
+                    *(b.ingest_run(payload) for b in self.backends), return_exceptions=True
                 )
                 backend_errors.extend(r for r in responses if isinstance(r, BaseException))
 
@@ -137,17 +140,14 @@ class AsyncBench(_ExperimentHost):
             result.status = "error"
             raise
         finally:
-            try:
-                responses = await asyncio.gather(
-                    *(b.close() for b in self.backends),
-                    return_exceptions=True,
-                )
-                backend_errors.extend(r for r in responses if isinstance(r, BaseException))
-                if backend_errors:
-                    result.status = "error"
-            finally:
-                result.finished_at = datetime.now(UTC)
-                write_record(directory / "manifest.json", result)
+            responses = await asyncio.gather(
+                *(b.close() for b in self.backends), return_exceptions=True
+            )
+            backend_errors.extend(r for r in responses if isinstance(r, BaseException))
+            if backend_errors:
+                result.status = "error"
+            result.finished_at = datetime.now(UTC)
+            write_record(directory / "manifest.json", result)
         if backend_errors:
             raise RuntimeError(
                 f"Report backend failed; results are saved in {directory}"

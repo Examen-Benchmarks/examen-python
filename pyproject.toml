@@ -5,7 +5,7 @@ description = "Python SDK for Examen, a generic benchmarking platform."
 readme = "README.md"
 authors = [{ name = "Célestin Cordos", email = "celestin.cordos@outlook.fr" }]
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.28.1", "pydantic>=2.13.3"]
+dependencies = ["httpx>=0.28.1", "pydantic>=2.13.3", "typer>=0.16.0"]
 
 [project.scripts]
 examen = "examen.cli.main:main"

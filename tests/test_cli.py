@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from typer.testing import CliRunner
 
 from examen.artifacts import save_run
+from examen.cli.main import app, main
 
 BENCHMARK = """
 from __future__ import annotations
@@ -317,3 +319,61 @@ def test_upload_requires_credentials_but_run_does_not(tmp_path: Path) -> None:
     result = run_cli(tmp_path, "upload", "results", "--url", "https://examen.test")
     assert result.returncode == 2
     assert "EXAMEN_API_KEY" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command", "options"),
+    [
+        (
+            "run",
+            [
+                "--filter",
+                "--list",
+                "--version",
+                "--concurrency",
+                "--output-dir",
+                "--upload",
+                "--url",
+            ],
+        ),
+        ("upload", ["--url", "--max-attempts", "--retry-delay"]),
+        ("inspect", ["manifest.json"]),
+    ],
+)
+def test_typer_command_help(command: str, options: list[str]) -> None:
+    result = CliRunner().invoke(app, [command, "--help"], color=False)
+    assert result.exit_code == 0, result.output
+    for option in options:
+        assert option in result.output
+
+
+def test_explicit_arguments_use_typer_and_preserve_exit_codes(tmp_path: Path) -> None:
+    assert main(["run", "--concurrency", "0"]) == 2
+    assert main(["run", "--unknown-option"]) == 2
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"status": "completed"}')
+    assert main(["inspect", str(manifest)]) == 0
+    assert main(["inspect", str(tmp_path / "missing.json")]) == 2
+
+
+def test_run_upload_saves_and_delivers_with_typer_options(tmp_path: Path) -> None:
+    write_bench(tmp_path)
+    with upload_server() as server:
+        env = {"EXAMEN_URL": f"http://127.0.0.1:{server.server_port}", "EXAMEN_API_KEY": "test-key"}
+        result = run_cli(tmp_path, "run", "--upload", "--concurrency", "1", env=env)
+        assert result.returncode == 0, result.stderr
+        records = saved_runs(tmp_path / ".examen")
+        assert len(records) == 4
+        assert all(record["uploaded"] for record in records)
+        assert len(server.requests) == 5
+        record_path = next((tmp_path / ".examen").rglob("runs/*.json"))
+        replay = run_cli(tmp_path, "upload", str(record_path), env=env)
+        assert replay.returncode == 0, replay.stderr
+        assert len(server.requests) == 5
+
+
+@pytest.mark.parametrize("delay", ["nan", "inf", "-1"])
+def test_upload_rejects_invalid_retry_delay(tmp_path: Path, delay: str) -> None:
+    result = run_cli(tmp_path, "upload", "results", "--retry-delay", delay)
+    assert result.returncode == 2
+    assert "finite nonnegative" in result.stderr

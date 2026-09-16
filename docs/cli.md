@@ -50,6 +50,7 @@ examen run benchmarks/ --list
 examen run benchmarks/ --filter regression
 examen run benchmarks/ --version '{"model":"candidate","prompt":"v2"}' --concurrency 10
 examen run benchmarks/ --output-dir ./results
+examen run benchmarks/ --upload --url https://examen.example
 ```
 
 - With no paths, discovery starts in the current directory. Directory discovery
@@ -100,6 +101,16 @@ export EXAMEN_API_KEY=...
 examen upload .examen/results/<execution-id>
 ```
 
+## Inspect a saved execution
+
+Print the execution manifest without contacting the backend:
+
+```bash
+examen inspect .examen/results/<execution-id>/<bench-execution-id>
+```
+
+You can also pass the manifest file directly.
+
 Use `--url` to override `EXAMEN_URL`. You can also target a bench directory, its
 `manifest.json`, a `runs/` directory, or a single run JSON file. Upload does not
 import benchmark code or invoke experiments/scorers. See
@@ -122,9 +133,10 @@ result = await bench.run(
 print(result.path, result.completed, result.errored)
 ```
 
-`bench.list_experiments()` provides metadata without executing. Optional local
-report sinks, such as `LocalReportBackend`, can still be passed with `backends=`;
-JSON is always saved before those sinks receive results.
+`bench.list_experiments()` provides metadata without executing. With `--upload`,
+each JSON result is delivered after it is atomically saved. The legacy
+`backends=` argument remains supported for compatibility; new code should let
+the engine save JSON and deliver it separately with `examen upload`.
 
 ## Package boundary
 
