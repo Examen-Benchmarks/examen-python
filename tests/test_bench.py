@@ -1,12 +1,14 @@
 """End-to-end behavioral tests for AsyncBench.
 
-Uses an in-memory FakeBackend (no live HTTP). Covers the contract that matters
+Reads durable JSON results from a temporary directory. Covers the contract that matters
 to downstream users: success/error status, repeats, DI overrides, scorer
 type-mismatch validation at decoration, keyed identity, and the emitted
 collection_path for nested collections.
 """
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -26,22 +28,12 @@ from examen import (
 )
 
 
-class FakeBackend:
-    def __init__(self) -> None:
-        self.payloads: list[dict[str, Any]] = []
-        self.close_calls = 0
-
-    async def ingest_run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.payloads.append(payload)
-        return {"ok": True}
-
-    async def close(self) -> None:
-        self.close_calls += 1
+def payloads(directory: Path) -> list[dict[str, Any]]:
+    return [json.loads(path.read_text())["payload"] for path in directory.rglob("runs/*.json")]
 
 
-def make_bench(backend: FakeBackend) -> AsyncBench:
+def make_bench() -> AsyncBench:
     return AsyncBench(
-        backends=[backend],
         project=Ref(key="p", name="Project"),
         bench=Ref(key="b", name="Bench"),
     )
@@ -65,9 +57,8 @@ def make_dep() -> Dep:
     return Dep("default")
 
 
-async def test_succeeded_run_with_matching_output_emits_metric_one() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_succeeded_run_with_matching_output_emits_metric_one(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -80,10 +71,10 @@ async def test_succeeded_run_with_matching_output_emits_metric_one() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    assert len(backend.payloads) == 1
-    p = backend.payloads[0]
+    assert len(payloads(tmp_path)) == 1
+    p = payloads(tmp_path)[0]
     assert p["run"]["status"] == "succeeded"
     assert p["project"] == {"key": "p", "name": "Project", "description": None}
     assert p["bench"] == {"key": "b", "name": "Bench", "description": None}
@@ -102,9 +93,8 @@ async def test_succeeded_run_with_matching_output_emits_metric_one() -> None:
     ]
 
 
-async def test_mismatched_output_emits_metric_zero() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_mismatched_output_emits_metric_zero(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -119,14 +109,13 @@ async def test_mismatched_output_emits_metric_zero() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    assert backend.payloads[0]["metrics"][0]["value"] == 0.0
+    assert payloads(tmp_path)[0]["metrics"][0]["value"] == 0.0
 
 
-async def test_repeats_produce_separate_runs() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_repeats_produce_separate_runs(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -141,14 +130,13 @@ async def test_repeats_produce_separate_runs() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    assert len(backend.payloads) == 3
+    assert len(payloads(tmp_path)) == 3
 
 
-async def test_function_raise_marks_run_errored() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_function_raise_marks_run_errored(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="boom",
@@ -161,17 +149,16 @@ async def test_function_raise_marks_run_errored() -> None:
     async def boom(input: Input) -> Output:
         raise RuntimeError("kaboom")
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["run"]["status"] == "errored"
     assert "kaboom" in p["run"]["error_message"]
     assert p["metrics"] == []
 
 
-async def test_dependency_override_is_applied() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_dependency_override_is_applied(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="dep",
@@ -186,16 +173,17 @@ async def test_dependency_override_is_applied() -> None:
         return Output(result=input.a + input.b)
 
     await bench.run(
+        output_dir=tmp_path,
         version={"v": "1"},
         dependency_overrides={make_dep: lambda: Dep("overridden")},
     )
 
-    steps = backend.payloads[0]["run"]["trace"]["steps"]
+    steps = payloads(tmp_path)[0]["run"]["trace"]["steps"]
     assert steps[0]["fields"]["dep_label"] == "overridden"
 
 
-def test_scorer_type_mismatch_raises_at_decoration() -> None:
-    bench = make_bench(FakeBackend())
+def test_scorer_type_mismatch_raises_at_decoration(tmp_path: Path) -> None:
+    bench = make_bench()
 
     class OtherIn(BaseModel):
         x: int
@@ -215,8 +203,8 @@ def test_scorer_type_mismatch_raises_at_decoration() -> None:
             return Output(result=0)
 
 
-def test_duplicate_experiment_key_raises() -> None:
-    bench = make_bench(FakeBackend())
+def test_duplicate_experiment_key_raises(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](key="dup", name="first", cases=[], scorers=[])
     def f(input: Input, trace: Trace[Input, Output]) -> Output:
@@ -229,35 +217,8 @@ def test_duplicate_experiment_key_raises() -> None:
             return Output(result=0)
 
 
-def test_fans_out_to_all_backends() -> None:
-    b1 = FakeBackend()
-    b2 = FakeBackend()
-    bench = AsyncBench(
-        backends=[b1, b2],
-        project=Ref(key="p", name="Project"),
-        bench=Ref(key="b", name="Bench"),
-    )
-
-    @bench.experiment[Input, Output](
-        key="add",
-        name="add",
-        cases=[
-            Case[Input, Output](key="x", name="x", input=Input(a=1, b=2), output=Output(result=3))
-        ],
-        scorers=[ExactMatchScorer[Input, Output]()],
-    )
-    def add(input: Input, trace: Trace[Input, Output]) -> Output:
-        return Output(result=input.a + input.b)
-
-    asyncio.run(bench.run(version={"v": "1"}))
-
-    assert len(b1.payloads) == 1
-    assert len(b2.payloads) == 1
-
-
-async def test_nested_collections_emit_collection_path() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_nested_collections_emit_collection_path(tmp_path: Path) -> None:
+    bench = make_bench()
 
     regression = Collection(key="regression", name="Regression")
     translation = Collection(key="translation", name="Translation")
@@ -288,9 +249,9 @@ async def test_nested_collections_emit_collection_path() -> None:
     def bleu(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    by_exp = {p["experiment"]["key"]: p for p in backend.payloads}
+    by_exp = {p["experiment"]["key"]: p for p in payloads(tmp_path)}
     assert by_exp["smoke"]["collection_path"] == []
     assert by_exp["bleu"]["collection_path"] == [
         {"key": "regression", "name": "Regression", "description": None},
@@ -298,19 +259,18 @@ async def test_nested_collections_emit_collection_path() -> None:
     ]
 
 
-def test_duplicate_collection_key_raises() -> None:
-    bench = make_bench(FakeBackend())
+def test_duplicate_collection_key_raises(tmp_path: Path) -> None:
+    bench = make_bench()
     bench.include(Collection(key="dup", name="First"))
 
     with pytest.raises(ValueError, match="already included"):
         bench.include(Collection(key="dup", name="Second"))
 
 
-async def test_same_experiment_key_under_different_collections_coexist() -> None:
+async def test_same_experiment_key_under_different_collections_coexist(tmp_path: Path) -> None:
     """Experiment identity is sibling-scoped: the same key may live under two
     different collections without colliding (benches.md invariant)."""
-    backend = FakeBackend()
-    bench = make_bench(backend)
+    bench = make_bench()
 
     fast = Collection(key="fast", name="Fast")
     slow = Collection(key="slow", name="Slow")
@@ -339,23 +299,21 @@ async def test_same_experiment_key_under_different_collections_coexist() -> None
     def slow_acc(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    assert len(backend.payloads) == 2
+    assert len(payloads(tmp_path)) == 2
     paths = {
         tuple(seg["key"] for seg in p["collection_path"])
-        for p in backend.payloads
+        for p in payloads(tmp_path)
         if p["experiment"]["key"] == "accuracy"
     }
     assert paths == {("fast",), ("slow",)}
 
 
-async def test_descriptions_flow_into_payload() -> None:
+async def test_descriptions_flow_into_payload(tmp_path: Path) -> None:
     """key + name + description (D15) are emitted for every named entity, and
     the collection_path segments carry their descriptions too."""
-    backend = FakeBackend()
     bench = AsyncBench(
-        backends=[backend],
         project=Ref(key="p", name="Project", description="the project"),
         bench=Ref(key="b", name="Bench", description="the bench"),
     )
@@ -380,9 +338,9 @@ async def test_descriptions_flow_into_payload() -> None:
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["project"]["description"] == "the project"
     assert p["bench"]["description"] == "the bench"
     assert p["collection_path"] == [{"key": "g", "name": "Group", "description": "a group"}]
@@ -390,9 +348,8 @@ async def test_descriptions_flow_into_payload() -> None:
     assert p["case"]["description"] == "a case"
 
 
-async def test_scorer_emits_multiple_metrics_with_distinct_keys() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_scorer_emits_multiple_metrics_with_distinct_keys(tmp_path: Path) -> None:
+    bench = make_bench()
 
     class MultiScorer(AsyncScorer[Input, Output]):
         async def score(
@@ -416,14 +373,14 @@ async def test_scorer_emits_multiple_metrics_with_distinct_keys() -> None:
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    metrics = backend.payloads[0]["metrics"]
+    metrics = payloads(tmp_path)[0]["metrics"]
     assert [m["key"] for m in metrics] == ["count", "ratio"]
     assert [m["value"] for m in metrics] == [2.0, 0.5]
 
 
-def _tree_bench(backend: FakeBackend) -> AsyncBench:
+def _tree_bench() -> AsyncBench:
     """A 3-experiment tree:
 
     bench
@@ -433,7 +390,7 @@ def _tree_bench(backend: FakeBackend) -> AsyncBench:
         └── translation
             └── bleu
     """
-    bench = make_bench(backend)
+    bench = make_bench()
 
     regression = Collection(key="regression", name="Regression")
     translation = Collection(key="translation", name="Translation")
@@ -476,75 +433,70 @@ def _tree_bench(backend: FakeBackend) -> AsyncBench:
     return bench
 
 
-def _ran(backend: FakeBackend) -> set[str]:
-    return {p["experiment"]["key"] for p in backend.payloads}
+def _ran(tmp_path: Path) -> set[str]:
+    return {p["experiment"]["key"] for p in payloads(tmp_path)}
 
 
-async def test_select_none_runs_everything() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"})
-    assert _ran(backend) == {"smoke", "latency", "bleu"}
+async def test_select_none_runs_everything(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
+    assert _ran(tmp_path) == {"smoke", "latency", "bleu"}
 
 
-async def test_select_single_root_experiment() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"}, select="smoke")
-    assert _ran(backend) == {"smoke"}
+async def test_select_single_root_experiment(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(output_dir=tmp_path, version={"v": "1"}, select="smoke")
+    assert _ran(tmp_path) == {"smoke"}
 
 
-async def test_select_collection_runs_subtree() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"}, select="regression")
-    assert _ran(backend) == {"latency", "bleu"}
+async def test_select_collection_runs_subtree(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(output_dir=tmp_path, version={"v": "1"}, select="regression")
+    assert _ran(tmp_path) == {"latency", "bleu"}
 
 
-async def test_select_nested_collection_runs_its_subtree() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"}, select="regression/translation")
-    assert _ran(backend) == {"bleu"}
+async def test_select_nested_collection_runs_its_subtree(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(output_dir=tmp_path, version={"v": "1"}, select="regression/translation")
+    assert _ran(tmp_path) == {"bleu"}
 
 
-async def test_select_full_path_runs_single_nested_experiment() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"}, select="regression/translation/bleu")
-    assert _ran(backend) == {"bleu"}
+async def test_select_full_path_runs_single_nested_experiment(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(output_dir=tmp_path, version={"v": "1"}, select="regression/translation/bleu")
+    assert _ran(tmp_path) == {"bleu"}
 
 
-async def test_select_accepts_multiple_selectors() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
-    await bench.run(version={"v": "1"}, select=["smoke", "regression/translation"])
-    assert _ran(backend) == {"smoke", "bleu"}
+async def test_select_accepts_multiple_selectors(tmp_path: Path) -> None:
+    bench = _tree_bench()
+    await bench.run(
+        output_dir=tmp_path, version={"v": "1"}, select=["smoke", "regression/translation"]
+    )
+    assert _ran(tmp_path) == {"smoke", "bleu"}
 
 
-async def test_select_unknown_raises_and_touches_no_backend() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
+async def test_select_unknown_raises_without_writing_results(tmp_path: Path) -> None:
+    bench = _tree_bench()
     with pytest.raises(ValueError, match="matched no experiments"):
-        await bench.run(version={"v": "1"}, select="nope")
-    # Validation happens before any backend is touched: no runs, no close().
-    assert backend.payloads == []
-    assert backend.close_calls == 0
+        await bench.run(output_dir=tmp_path, version={"v": "1"}, select="nope")
+    # Selection validation happens before creating any artifacts.
+    assert payloads(tmp_path) == []
+    assert not list(tmp_path.iterdir())
 
 
-async def test_select_partial_unknown_in_list_raises() -> None:
-    backend = FakeBackend()
-    bench = _tree_bench(backend)
+async def test_select_partial_unknown_in_list_raises(tmp_path: Path) -> None:
+    bench = _tree_bench()
     with pytest.raises(ValueError, match="regression/typo"):
-        await bench.run(version={"v": "1"}, select=["smoke", "regression/typo"])
-    assert backend.payloads == []
+        await bench.run(
+            output_dir=tmp_path, version={"v": "1"}, select=["smoke", "regression/typo"]
+        )
+    assert payloads(tmp_path) == []
 
 
-async def test_runs_execute_concurrently() -> None:
+async def test_runs_execute_concurrently(tmp_path: Path) -> None:
     """A barrier that only releases once all N runs have arrived deadlocks under
     serial execution — completing it proves the runs overlap."""
-    backend = FakeBackend()
-    bench = make_bench(backend)
+    bench = make_bench()
     n = 5
     barrier = asyncio.Barrier(n)
 
@@ -564,13 +516,14 @@ async def test_runs_execute_concurrently() -> None:
         return Output(result=input.a)
 
     # Times out (rather than hanging forever) if execution is serial.
-    await asyncio.wait_for(bench.run(version={"v": "1"}, concurrency=n), timeout=5)
-    assert len(backend.payloads) == n
+    await asyncio.wait_for(
+        bench.run(output_dir=tmp_path, version={"v": "1"}, concurrency=n), timeout=5
+    )
+    assert len(payloads(tmp_path)) == n
 
 
-async def test_concurrency_limit_is_respected() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_concurrency_limit_is_respected(tmp_path: Path) -> None:
+    bench = make_bench()
     limit = 3
     n = 9
     active = 0
@@ -598,22 +551,21 @@ async def test_concurrency_limit_is_respected() -> None:
             active -= 1
         return Output(result=input.a)
 
-    await bench.run(version={"v": "1"}, concurrency=limit)
+    await bench.run(output_dir=tmp_path, version={"v": "1"}, concurrency=limit)
 
-    assert len(backend.payloads) == n
+    assert len(payloads(tmp_path)) == n
     assert peak <= limit  # the semaphore caps in-flight runs
     assert peak > 1  # but they really do overlap
 
 
-def test_invalid_concurrency_raises() -> None:
-    bench = make_bench(FakeBackend())
+def test_invalid_concurrency_raises(tmp_path: Path) -> None:
+    bench = make_bench()
     with pytest.raises(ValueError, match="concurrency must be >= 1"):
-        asyncio.run(bench.run(version={"v": "1"}, concurrency=0))
+        asyncio.run(bench.run(output_dir=tmp_path, version={"v": "1"}, concurrency=0))
 
 
-async def test_no_summarizers_means_null_summaries() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_no_summarizers_means_null_summaries(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -626,16 +578,15 @@ async def test_no_summarizers_means_null_summaries() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["case"]["input_summary"] is None
     assert p["run"]["output_summary"] is None
 
 
-async def test_summarizers_appear_in_payload() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_summarizers_appear_in_payload(tmp_path: Path) -> None:
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -650,16 +601,15 @@ async def test_summarizers_appear_in_payload() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["case"]["input_summary"] == "1 + 2"
     assert p["run"]["output_summary"] == "3"
 
 
-async def test_summarizer_raise_falls_back_to_repr() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_summarizer_raise_falls_back_to_repr(tmp_path: Path) -> None:
+    bench = make_bench()
 
     def boom(_: Input) -> str:
         raise ValueError("nope")
@@ -676,15 +626,14 @@ async def test_summarizer_raise_falls_back_to_repr() -> None:
     def add(input: Input, trace: Trace[Input, Output]) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["case"]["input_summary"] == repr(Input(a=1, b=2))
 
 
-async def test_errored_run_skips_output_summary() -> None:
-    backend = FakeBackend()
-    bench = make_bench(backend)
+async def test_errored_run_skips_output_summary(tmp_path: Path) -> None:
+    bench = make_bench()
 
     summarize_output_calls: list[Any] = []
 
@@ -705,17 +654,17 @@ async def test_errored_run_skips_output_summary() -> None:
     def boom(input: Input) -> Output:
         raise RuntimeError("kaboom")
 
-    await bench.run(version={"v": "1"})
+    await bench.run(output_dir=tmp_path, version={"v": "1"})
 
-    p = backend.payloads[0]
+    p = payloads(tmp_path)[0]
     assert p["run"]["status"] == "errored"
     assert p["case"]["input_summary"] == "0,0"  # input summary still computed
     assert p["run"]["output_summary"] is None
     assert summarize_output_calls == []  # summarize_output not invoked on error
 
 
-def test_non_callable_summarizer_raises_at_decoration() -> None:
-    bench = make_bench(FakeBackend())
+def test_non_callable_summarizer_raises_at_decoration(tmp_path: Path) -> None:
+    bench = make_bench()
 
     with pytest.raises(TypeError, match="summarize_input must be callable"):
         bench.experiment[Input, Output](
@@ -727,9 +676,9 @@ def test_non_callable_summarizer_raises_at_decoration() -> None:
         )
 
 
-def test_experiment_without_subscript_is_not_callable() -> None:
+def test_experiment_without_subscript_is_not_callable(tmp_path: Path) -> None:
     """The untyped form is deliberately removed — calling without subscript fails."""
-    bench = make_bench(FakeBackend())
+    bench = make_bench()
 
     with pytest.raises(TypeError, match="not callable"):
         bench.experiment(key="x", name="x", cases=[], scorers=[])  # type: ignore[operator]

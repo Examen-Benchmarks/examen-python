@@ -12,7 +12,6 @@ from typing import Any
 from uuid import uuid4
 
 from examen.artifacts import ExperimentInfo, RunProgress, RunResult, save_run, write_record
-from examen.lib.backends.base import Backend
 from examen.lib.base import Case, Metric, Ref, RunStatus
 from examen.lib.depends import solve
 from examen.lib.host import _Experiment, _ExperimentHost
@@ -24,11 +23,8 @@ class AsyncBench(_ExperimentHost):
         self,
         project: Ref,
         bench: Ref,
-        *,
-        backends: Sequence[Backend] = (),
     ) -> None:
         super().__init__()
-        self.backends = list(backends)
         self.project = project
         self.bench = bench
 
@@ -57,15 +53,14 @@ class AsyncBench(_ExperimentHost):
 
         Matching is by key prefix. ``select=None`` runs everything. A selector
         that matches no experiment raises ``ValueError`` (typo guard), and the
-        check happens before any backend is touched so a bad selector produces
-        no report.
+        check happens before creating any result files.
 
         ``concurrency`` bounds how many **runs** (one ``f(case)`` for one repeat,
         the leaf unit) execute at once, across all experiments / cases / repeats.
         The default of 15 overlaps the I/O-bound waits typical of eval workloads;
         pass ``concurrency=1`` for fully serial execution. Each run is isolated
         (its own ``Trace`` and dependency scope), so overlap is safe; only the
-        order runs reach the backends becomes nondeterministic, which read-time
+        order results are saved becomes nondeterministic, which read-time
         aggregation does not depend on.
         """
         if concurrency < 1:
@@ -88,26 +83,23 @@ class AsyncBench(_ExperimentHost):
         directory.mkdir(parents=True, exist_ok=False)
         write_record(directory / "manifest.json", result)
         semaphore = asyncio.Semaphore(concurrency)
-        backend_errors: list[BaseException] = []
 
         async def _bounded(
             exp: _Experiment, collection_path: list[Ref], case: Case[Any, Any]
         ) -> None:
             async with semaphore:
                 payload = await self._run_one(exp, collection_path, case, version, overrides)
-                # Save before any optional report sink or progress callback.
-                save_run(directory / "runs", payload)
-                if on_run_saved is not None:
-                    callback_result = on_run_saved(
-                        directory / "runs" / f"{payload['run']['id']}.json"
-                    )
-                    if inspect.isawaitable(callback_result):
-                        await callback_result
+                # Save before invoking the caller's callbacks.
+                saved_path = save_run(directory / "runs", payload)
                 result.completed += 1
                 if payload["run"]["status"] == RunStatus.SUCCEEDED:
                     result.succeeded += 1
                 else:
                     result.errored += 1
+                if on_run_saved is not None:
+                    callback_result = on_run_saved(saved_path)
+                    if inspect.isawaitable(callback_result):
+                        await callback_result
                 if on_progress is not None:
                     on_progress(
                         RunProgress(
@@ -119,10 +111,6 @@ class AsyncBench(_ExperimentHost):
                             case=case.key,
                         )
                     )
-                responses = await asyncio.gather(
-                    *(b.ingest_run(payload) for b in self.backends), return_exceptions=True
-                )
-                backend_errors.extend(r for r in responses if isinstance(r, BaseException))
 
         try:
             # TaskGroup settles all child tasks before the manifest is finalized,
@@ -140,18 +128,8 @@ class AsyncBench(_ExperimentHost):
             result.status = "error"
             raise
         finally:
-            responses = await asyncio.gather(
-                *(b.close() for b in self.backends), return_exceptions=True
-            )
-            backend_errors.extend(r for r in responses if isinstance(r, BaseException))
-            if backend_errors:
-                result.status = "error"
             result.finished_at = datetime.now(UTC)
             write_record(directory / "manifest.json", result)
-        if backend_errors:
-            raise RuntimeError(
-                f"Report backend failed; results are saved in {directory}"
-            ) from backend_errors[0]
         return result
 
     def list_experiments(
@@ -159,7 +137,7 @@ class AsyncBench(_ExperimentHost):
         select: str | Sequence[str] | None = None,
         filter_pattern: str | None = None,
     ) -> list[ExperimentInfo]:
-        """Inspect the execution plan without invoking experiments or backends.
+        """Inspect the execution plan without invoking experiments or writing files.
 
         A regex filter matches project/bench/collection/experiment keys or the
         experiment's display name. ``select`` retains the SDK's prefix selectors.

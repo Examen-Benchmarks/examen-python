@@ -1,10 +1,6 @@
-"""End-to-end tests for the offline LocalReportBackend.
+"""HTML reports rendered from persisted benchmark results."""
 
-Runs a tiny bench with the backend wired in, checks that close() writes a
-self-contained HTML file containing the expected case names, metric names,
-status indicators, and (for nested collections) the collection breadcrumb.
-"""
-
+import json
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -15,13 +11,18 @@ from examen import (
     Case,
     Collection,
     ExactMatchScorer,
-    LocalReportBackend,
     Metric,
     MetricKind,
     Ref,
     Trace,
 )
 from examen.lib.report import render_html
+
+
+def write_report(results: Path, destination: Path) -> None:
+    runs = [json.loads(path.read_text())["payload"] for path in results.rglob("runs/*.json")]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(render_html(runs), encoding="utf-8")
 
 
 class Input(BaseModel):
@@ -33,17 +34,16 @@ class Output(BaseModel):
     result: int
 
 
-def make_bench(out: Path, project: str = "proj", bench: str = "bench-x") -> AsyncBench:
+def make_bench(project: str = "proj", bench: str = "bench-x") -> AsyncBench:
     return AsyncBench(
-        backends=[LocalReportBackend(out)],
         project=Ref(key="proj", name=project),
         bench=Ref(key="bench", name=bench),
     )
 
 
-async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
+async def test_saved_results_report_writes_self_contained_html(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = make_bench(out)
+    bench = make_bench()
 
     @bench.experiment[Input, Output](
         key="add",
@@ -64,7 +64,8 @@ async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
         trace.step("compute", a=input.a, b=input.b)
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"sdk": "0.0.3"})
+    await bench.run(version={"sdk": "0.0.3"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     assert out.exists()
     body = out.read_text(encoding="utf-8")
@@ -85,9 +86,9 @@ async def test_local_backend_writes_self_contained_html(tmp_path: Path) -> None:
     assert "1 + 2" in body  # input_summary rendered
 
 
-async def test_local_backend_renders_error_runs(tmp_path: Path) -> None:
+async def test_saved_results_report_renders_error_runs(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     @bench.experiment[Input, Output](
         key="boom",
@@ -100,7 +101,8 @@ async def test_local_backend_renders_error_runs(tmp_path: Path) -> None:
     async def boom(input: Input) -> Output:
         raise RuntimeError("kaboom")
 
-    await bench.run(version={"v": "1"})
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     body = out.read_text(encoding="utf-8")
     assert "errored" in body
@@ -108,9 +110,9 @@ async def test_local_backend_renders_error_runs(tmp_path: Path) -> None:
     assert "RuntimeError" in body
 
 
-async def test_local_backend_creates_parent_dirs(tmp_path: Path) -> None:
+async def test_saved_results_report_creates_parent_dirs(tmp_path: Path) -> None:
     out = tmp_path / "nested" / "deeper" / "report.html"
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     @bench.experiment[Input, Output](
         key="add",
@@ -123,14 +125,15 @@ async def test_local_backend_creates_parent_dirs(tmp_path: Path) -> None:
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     assert out.exists()
 
 
 async def test_nested_collections_render_breadcrumb(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     regression = Collection(key="regression", name="Regression")
     translation = Collection(key="translation", name="Translation")
@@ -148,7 +151,8 @@ async def test_nested_collections_render_breadcrumb(tmp_path: Path) -> None:
     def bleu(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     body = out.read_text(encoding="utf-8")
     assert 'class="breadcrumb"' in body
@@ -170,7 +174,7 @@ async def test_report_aggregates_by_metric_key_labels_by_name(tmp_path: Path) ->
         ) -> list[Metric]:
             return [Metric(key="exact_v2", name="Exact Match", kind=MetricKind.RATIO, value=1.0)]
 
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     @bench.experiment[Input, Output](
         key="add",
@@ -185,7 +189,8 @@ async def test_report_aggregates_by_metric_key_labels_by_name(tmp_path: Path) ->
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     body = out.read_text(encoding="utf-8")
     assert "Exact Match" in body  # column header uses the display name
@@ -215,7 +220,7 @@ async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
                 )
             ]
 
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     @bench.experiment[Input, Output](
         key="add",
@@ -228,7 +233,8 @@ async def test_metric_context_renders_under_chip(tmp_path: Path) -> None:
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     body = out.read_text(encoding="utf-8")
     assert "judge" in body
@@ -244,9 +250,9 @@ def test_render_html_handles_empty_runs() -> None:
     assert "No runs" in body
 
 
-async def test_close_idempotent_across_repeated_run_calls(tmp_path: Path) -> None:
+async def test_report_combines_saved_executions(tmp_path: Path) -> None:
     out = tmp_path / "report.html"
-    bench = make_bench(out, project="p", bench="b")
+    bench = make_bench(project="p", bench="b")
 
     @bench.experiment[Input, Output](
         key="add",
@@ -259,9 +265,11 @@ async def test_close_idempotent_across_repeated_run_calls(tmp_path: Path) -> Non
     def add(input: Input) -> Output:
         return Output(result=input.a + input.b)
 
-    await bench.run(version={"v": "1"})
-    await bench.run(version={"v": "2"})  # second invocation; close() runs again
+    await bench.run(version={"v": "1"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
+    await bench.run(version={"v": "2"}, output_dir=tmp_path / "results")
+    write_report(tmp_path / "results", out)
 
     body = out.read_text(encoding="utf-8")
-    # Both runs accumulate into the same backend
+    # Both saved executions can be combined into one report.
     assert body.count('<details><summary><span class="dot dot-ok"></span>') >= 2

@@ -4,9 +4,9 @@ Pure-stdlib renderer: emits one HTML5 document with inline CSS, no external
 resources, and no JavaScript. The output is a single portable file — designed
 for the offline path where there's no Examen server in the loop.
 
-The input is the same payload shape that backends receive from ``AsyncBench``
+The input is the payload saved in each JSON result by ``AsyncBench``
 (``project`` / ``bench`` / ``experiment`` / ``case`` / ``version`` / ``run`` /
-``metrics`` dicts). That makes the renderer reusable beyond the local backend:
+``metrics`` dicts). That makes the renderer reusable:
 load runs from any source and render.
 """
 

@@ -1,13 +1,12 @@
-"""Results survive report failures, and invalid storage fails before execution."""
+"""Results are saved locally, and invalid storage fails before execution."""
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from examen import AsyncBench, Backend, Case, Ref, RunProgress
+from examen import AsyncBench, Case, Ref, RunProgress
 
 
 class Input(BaseModel):
@@ -18,16 +17,8 @@ class Output(BaseModel):
     value: int = 1
 
 
-class FailedReport:
-    async def ingest_run(self, payload: dict[str, Any]) -> dict[str, Any]:
-        raise ConnectionError("report unavailable")
-
-    async def close(self) -> None:
-        pass
-
-
-def make_bench(executed: list[int], backends: list[Backend] | None = None) -> AsyncBench:
-    bench = AsyncBench(Ref(key="p", name="P"), Ref(key="b", name="B"), backends=backends or [])
+def make_bench(executed: list[int]) -> AsyncBench:
+    bench = AsyncBench(Ref(key="p", name="P"), Ref(key="b", name="B"))
 
     @bench.experiment[Input, Output](
         key="e",
@@ -42,15 +33,14 @@ def make_bench(executed: list[int], backends: list[Backend] | None = None) -> As
     return bench
 
 
-async def test_report_failure_does_not_lose_or_cancel_completed_work(tmp_path: Path) -> None:
+async def test_execution_saves_results_without_a_backend(tmp_path: Path) -> None:
     executed: list[int] = []
-    bench = make_bench(executed, [FailedReport()])
-    with pytest.raises(RuntimeError, match="results are saved"):
-        await bench.run({}, output_dir=tmp_path, concurrency=1)
+    bench = make_bench(executed)
+    await bench.run({}, output_dir=tmp_path, concurrency=1)
     assert executed == [1, 1, 1]
     assert len(list(tmp_path.rglob("runs/*.json"))) == 3
     manifest = json.loads(next(tmp_path.rglob("manifest.json")).read_text())
-    assert manifest["status"] == "error" and manifest["completed"] == 3
+    assert manifest["status"] == "completed" and manifest["completed"] == 3
 
 
 async def test_progress_only_reports_results_already_on_disk(tmp_path: Path) -> None:

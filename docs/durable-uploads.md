@@ -1,9 +1,20 @@
 # Durable benchmark uploads
 
 `examen run` saves each completed invocation as plain JSON before reporting
-progress or invoking optional report sinks. Results contain the trace, metrics,
-version, and parent references. Running benchmarks never automatically uploads
-results. See [the CLI guide](cli.md) for authoring and execution examples.
+progress or uploading it. Results contain the trace, metrics, version, and
+parent references. By default, results stay local. Add `--upload` to deliver
+them during execution:
+
+```bash
+export EXAMEN_URL=https://your-examen-server.example
+export EXAMEN_API_KEY=your-api-key
+examen run benchmarks/ --upload
+```
+
+Each result is saved before its upload is attempted. Retries are awaited during
+execution, so a slow or unavailable backend can delay the run. Exhausted
+delivery attempts leave saved results pending for later upload. See
+[the CLI guide](cli.md) for authoring and execution examples.
 
 ## Independent delivery and recovery
 
@@ -24,8 +35,9 @@ are retained after success. No API key is stored in the record.
 
 Transient transport errors, HTTP 408, 429, and 5xx responses receive up to 10
 attempts by default, in rounds across pending runs. Exponential backoff includes
-jitter and is capped at 30 seconds. Use `--max-attempts` and `--retry-delay` to
-configure retries. Other HTTP errors remain pending without repeated requests.
+jitter and is capped at 30 seconds. On `examen upload`, use `--max-attempts` and
+`--retry-delay` to configure retries. `examen run --upload` uses the defaults.
+Other HTTP errors remain pending without repeated requests.
 An exhausted upload reports the errors and exits with status 1. The results
 remain available for another attempt; successful files are not resent.
 

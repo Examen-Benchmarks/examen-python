@@ -18,25 +18,105 @@ Pre-alpha. Not on PyPI yet.
 - **Run** — one invocation of `f(one_case)` at one version, within a bench.
 - **Metric** — a numeric value emitted by a scorer, tagged with a kind (`pct | duration | currency | ratio | count | raw`).
 
-## Architecture
-
-```
-examen/
-  lib/                # framework: base classes, checks, runner, report helpers
-  cases/              # concrete BenchmarkCase subclasses (the "test code")
-# JSON inputs live outside the package — referenced by path/glob from case classes.
-```
-
-The SDK can record runs to:
-
-- a **local file backend** (SQLite) — for one-off or offline use,
-- the **remote backend** (Go API at `examen-backend`) — for shared / SaaS deployments.
-
-Both speak the same data model.
-
 ## Quickstart
 
-TBD — SDK is not yet implemented.
+Requires Python 3.12 or newer. From this checkout:
+
+```bash
+uv sync
+uv run examen --help
+```
+
+In another project's virtual environment, install the SDK from your local checkout:
+
+```bash
+uv pip install -e /path/to/examen-python
+```
+
+Create `benchmarks/addition.py`:
+
+```python
+from pydantic import BaseModel
+from examen import AsyncBench, Case, ExactMatchScorer, Ref
+
+class Number(BaseModel):
+    value: int
+
+bench = AsyncBench(
+    project=Ref(key="calculator", name="Calculator"),
+    bench=Ref(key="regression", name="Regression"),
+)
+
+@bench.experiment[Number, Number](
+    key="add-one",
+    name="Add one",
+    cases=[
+        Case[Number, Number](
+            key="one",
+            name="1 + 1",
+            input=Number(value=1),
+            output=Number(value=2),
+        )
+    ],
+    scorers=[ExactMatchScorer[Number, Number]()],
+)
+async def add_one(input: Number) -> Number:
+    return Number(value=input.value + 1)
+```
+
+The CLI discovers the module-level `bench`. Do not call `bench.run()` in that
+file. Preview the experiments, then run them locally:
+
+```bash
+uv run examen run benchmarks/ --list
+uv run examen run benchmarks/ --version '{"implementation":"v1"}'
+```
+
+No Examen account or server is needed for a local run. Each case result is saved
+as plain JSON under `.examen/results/`; the command prints its results directory.
+
+### Run and upload in one command
+
+```bash
+export EXAMEN_URL=https://your-examen-server.example
+export EXAMEN_API_KEY=your-api-key
+uv run examen run benchmarks/ --upload
+```
+
+Each result is saved locally **before** upload starts. Upload failures are
+retried, and the JSON files remain available after success or failure.
+Without `--upload`, execution only saves results locally.
+
+### Send saved results later
+
+Use the results directory printed by the run command:
+
+```bash
+uv run examen upload .examen/results/<execution-id>
+```
+
+You can also send a specific saved run:
+
+```bash
+uv run examen upload .examen/results/<execution-id>/<bench-execution-id>/runs/<run-id>.json
+```
+
+Upload requires the same URL and API key configuration shown above. Repeat
+`upload` after an outage: acknowledged results are skipped, and benchmarks are
+not executed again. Keep the original filenames and IDs.
+
+See the [CLI guide](docs/cli.md) for selection, concurrency, inspection, exit
+codes, and migration from `backends=`. See [durable uploads](docs/durable-uploads.md)
+for retry settings and backend compatibility.
+
+## Architecture
+
+- **SDK:** define and execute benchmarks; save durable JSON results.
+- **CLI:** discover definitions, display progress, and orchestrate uploads.
+- **Uploader:** deliver saved results with retries, independently of execution.
+
+These ship in one Python package. `AsyncBench(project=..., bench=...)` does not
+accept `backends=`; delivery belongs to the CLI or the separate `Uploader`.
 
 ## Related repos
 
